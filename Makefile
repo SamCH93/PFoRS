@@ -17,8 +17,6 @@ dbuild: Dockerfile
 docker: dbuild
 	docker run \
     --rm \
-	--env pdfdocker="true" \
 	--env FILE=$(FILE) \
 	--volume $(CURDIR):/output \
 	$(FILE)
-	# mv $(FILE).pdf paper/$(FILE).pdf

@@ -23,9 +23,9 @@ cd packages
 R CMD INSTALL biostatUZH_1.8.0.tar.gz
 ```
 
-Then run
+Then run from the root directory of the repository
 
-``` sh
+``` 
 make local
 ```
 
@@ -43,8 +43,8 @@ submission.
 
 Run in a shell from the root directory of the repository
 
-``` sh
-make drunpdf
+```
+make docker
 ```
 
 this should output the main manuscript and the two supplements. The Docker
