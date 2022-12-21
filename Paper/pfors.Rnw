@@ -1,0 +1,1847 @@
+\documentclass[a4paper, 11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{graphics}
+\usepackage{amsmath, amssymb}
+\usepackage[longnamesfirst,round]{natbib}
+\input{newCommands.tex} % commands by leo for nicer formatting
+\usepackage{tikz} % to draw hierarchical model
+\usetikzlibrary{bayesnet} % to draw hierarchical model
+\usepackage{booktabs} % nicer tables
+\usepackage{doi}
+
+% margins %
+\usepackage{geometry}
+ \geometry{
+ a4paper,
+ total={170mm,257mm},
+ left=25mm,
+ right=25mm,
+ top=30mm,
+ bottom=25mm,
+ }
+
+\title{\vspace{-3em}\textbf{Probabilistic forecasting of replication studies}}
+\author{\textbf{Samuel Pawel, Leonhard Held} \\
+Epidemiology, Biostatistics and Prevention Institute (EBPI) \\
+Center for Reproducible Science (CRS) \\
+University of Zurich, Switzerland \\
+E-mail: \href{mailto:samuel.pawel@uzh.ch}{samuel.pawel@uzh.ch}}
+
+\makeatletter
+
+% hyperref options
+\usepackage{hyperref}  
+\hypersetup{
+  bookmarksopen=true, 
+  breaklinks=true,
+  pdftitle={Probabilistic forecasting of replication studies}, 
+  pdfauthor={Samuel Pawel, Leonhard Held},
+  colorlinks=true,
+  linkcolor=black,
+  anchorcolor=black,
+  citecolor=blue,
+  urlcolor=black,
+}
+
+% Headers and footers
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\lhead{Probabilistic forecasting of replication studies}
+\rhead{Samuel Pawel, Leonhard Held}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\begin{minipage}{12cm}
+  \rule{\textwidth}{0.4pt} \\
+  {\small
+    \centering \textbf{Abstract} \\
+    Throughout the last decade, the so-called replication crisis has stimulated
+    many researchers to conduct large-scale replication projects. With data from
+    four of these projects, we computed probabilistic forecasts of the
+    replication outcomes, which we then evaluated regarding discrimination,
+    calibration and sharpness. A novel model, which can take into account both
+    inflation and heterogeneity of effects, was used and predicted the effect
+    estimate of the replication study with good performance in two of the four
+    data sets. In the other two data sets, predictive performance was still
+    substantially improved compared to the naive model which does not consider
+    inflation and heterogeneity of effects. The results suggest that many of the
+    estimates from the original studies were inflated, possibly caused by
+    publication bias or questionable research practices, and also that some
+    degree of heterogeneity between original and replication effects should be
+    expected. Moreover, the results indicate that the use of statistical
+    significance as the only criterion for replication success may be
+    questionable, since from a predictive viewpoint, non-significant replication
+    results are often compatible with significant results from the original
+    study. The developed statistical methods as well as the data sets are
+    available in the \textsf{R} package \texttt{ReplicationSuccess}. }
+  \rule{\textwidth}{0.4pt} \\
+\end{minipage}
+\end{center}
+
+% knitr options
+% ===============================================================================
+<< "main-setup", include = FALSE >>=
+library(knitr)
+opts_chunk$set(fig.height = 4,
+               echo = FALSE,
+               warning = FALSE,
+               message = FALSE,
+               cache = FALSE)
+@
+% Data and libraries loading
+<< "data-libraries-setup" >>=
+## should sessionInfo be printed at the end?
+Reproducibility <- TRUE
+
+# Packages
+library("dplyr")
+library("tidyr")
+library("ggplot2")
+library("ggbeeswarm")
+library("ggpubr") 
+library("tables")
+library("biostatUZH")
+# can be installed with: install.packages("biostatUZH", repos = "http://R-Forge.R-project.org")
+
+# Load meta-analytic subset data (i.e. SE of Fisher z-transformed correlation
+# can be computed)
+replication_data <- read.csv("../Data/replications_ma_subset.csv")
+
+# Prediction market data
+pm_data <- replication_data %>% 
+  filter(!is.na(Market_Belief))
+
+# Levels and labels of factors
+levels_projects <- c("Experimental Economics", 
+                     "Experimental Philosophy", 
+                     "Psychology",
+                     "Social Sciences")
+labels_projects2lines <- c("Experimental \nEconomics", 
+                           "Experimental \nPhilosophy", 
+                           "Psychology", 
+                           "Social \nSciences")
+levels_methods <- c("N", 
+                    "S", 
+                    "H", 
+                    "SH")
+levels_methods_pm <- c(levels_methods, "PM")
+levels_scores <- c("QS",
+                   "LS", 
+                   "CRPS")
+
+# Colors
+colors_methods <- c("N" = "#F8766D",
+                    "H" = "#7CAE00",
+                    "S" = "#00BFC4",
+                    "SH" = "#C77CFF",
+                    "PM" = "#104E8B")
+@
+% Helper for predictive distributions
+<< "helper-predictive-distribution" >>=
+# Default value for tau hyperparameter (see article for how this was determined)
+tau_default <- 0.08 
+
+# Functions to obtain parameters of predictive distributions
+get_params <- function(theta_o, sigma_o, sigma_r, tau = tau_default, prior = "flat") {
+  t_o <- theta_o/sigma_o
+  d <- tau^2/sigma_o^2
+  if (prior == "sceptical") s <- pmax(1 - (1 + d)/t_o^2, 0)
+  if (prior == "flat") s <- 1
+  mu <- s*theta_o
+  sigma <- sqrt(s*(sigma_o^2 + tau^2) + sigma_r^2 + tau^2)
+  return(data.frame("mu" = mu, "sigma" = sigma))
+}
+
+prediction_methods <- list(
+  "N" = function(theta_o, sigma_o, sigma_r, tau) {
+    get_params(theta_o, sigma_o, sigma_r, tau = 0, prior = "flat")
+    },
+  "S" = function(theta_o, sigma_o, sigma_r, tau) {
+    get_params(theta_o, sigma_o, sigma_r, tau = 0, prior = "sceptical")
+    },
+  "H" = function(theta_o, sigma_o, sigma_r, tau) {
+    get_params(theta_o, sigma_o, sigma_r, tau = tau, prior = "flat")
+    },
+  "SH" = function(theta_o, sigma_o, sigma_r, tau) {
+    get_params(theta_o, sigma_o, sigma_r, tau = tau, prior = "sceptical")
+    }
+  )
+
+get_params_all_methods <- function(theta_o, sigma_o, sigma_r, tau = tau_default, 
+                                   methods = prediction_methods) {
+  params <- lapply(methods, function(f) f(theta_o = theta_o, sigma_o = sigma_o, 
+                                          sigma_r = sigma_r, tau = tau))
+  return(params)
+}
+@
+% ==========================================================================================
+
+\section{Introduction}
+Direct replication of past studies is an essential tool in the modern scientific
+process for assessing the credibility of scientific discoveries. Over the course
+of the last decade, however, concerns regarding the replicability of scientific
+discoveries have increased dramatically, leading many to conclude that science
+is in a crisis \citep{Ioannidis2005, Begley2015}.
+
+For this reason, researchers in different fields, \eg psychology or economics,
+have joined forces to conduct large-scale replication projects. In such a
+replication project, representative original studies are carefully selected and
+then direct replication studies of these original studies are carried out. By
+now, many of the initial projects have been completed and their data made
+available to the public \citep{Klein2014, Opensc2015, Camerer2016, Ebersole2016,
+  Camerer2018, Cova2018, Klein2018}. The low rate of replication success in some
+of these projects has received enormous attention in the media and scientific
+communities. Moreover, these results lead to an increased awareness of the
+replication crisis as well as to increased interest in research on the
+scientific process itself (\emph{meta-science}).
+
+
+Making forecasts about an uncertain future is a common human desire and central
+for decision making in science and society \citep{Gneiting2008, Gneiting2014}.
+There have been many attempts to forecast the outcomes of replication studies
+based on the results from the original studies \citep{Dreber2015, Patil2016,
+  Camerer2016, Camerer2018, Altmejd2019, Forsell2019}. This is interesting for
+various reasons: First, a forecast of how likely a replication will be
+``successful'' according to some criterion (\eg an effect estimate reaches
+statistical significance) can help to assess the credibility of the original
+finding in the first place and inform the decision whether a replication study
+should be conducted at all. Second, after a replication has been completed, its
+results can be compared to its forecast in order to assess compatibility between
+the two findings. Finally, forecasting can also be helpful in designing an
+informative replication study, for example it can be used for sample size
+planning.
+
+
+Although there have been theoretical contributions to the literature long before
+the replication crisis started \citep{Goodman1992, Senn2002, Bayarri2002}, the
+last years have witnessed new developments regarding forecasting of replication
+studies. Moreover, due to the increasing popularity of replication studies,
+forecasts could be evaluated with actual data.
+
+
+For instance, \emph{prediction markets} have been used in order to estimate the
+peer belief about whether a replication will result in a statistically
+significant outcome \citep{Dreber2015, Camerer2016, Camerer2018, Forsell2019}.
+Prediction markets are a tool to aggregate beliefs of market participants
+regarding the possibility of an investigated outcome and they have been used
+successfully in numerous domains, \eg sports and politics. However, despite good
+predictive performance, taking statistical significance as the target variable
+of the forecasts requires arbitrary dichotomization of the outcomes, although
+one would prefer to rather forecast the replication effect estimate itself.
+Moreover, the evaluation of these forecasts was usually based on ad-hoc measures
+such as correlation of the estimated probabilities with the outcome. In fields
+where forecasting is of central importance, \eg meteorology, climatology, or
+infectious disease epidemiology, extensive methodology has been developed to
+specifically assess calibration, discrimination, and sharpness of probabilistic
+forecasts \citep{Gneiting2014}. It is therefore of interest to assess whether
+more insights about the forecasts can be gained when applying a more
+state-of-the-art evaluation strategy. Finally, it is also of interest to
+benchmark the prediction market forecasts with statistical forecasts that do not
+require recruiting experts and setting up prediction market infrastructure.
+
+A statistical method to obtain probabilistic forecasts of replication estimates
+was proposed by \citet{Patil2016} and then also used in the analysis of the
+outcomes of some large-scale replication projects. Specifically, the agreement
+between the original and replication study was assessed by a prediction interval
+of the replication effect estimate based on the original effect estimate. This
+method was illustrated using the data set from the \emph{Reproducibility
+  Project: Psychology} \citep{Opensc2015}, and it was also used in the analyses
+of the \emph{Experimental Economics Replication Project} \citep{Camerer2016} and
+the \emph{Social Sciences Replication Project} \citep{Camerer2018}. In all of
+these analyses, the coverage of the 95\% prediction intervals was examined to
+assess predictive performance. Although this evaluation method provides some
+clue about the calibration of the forecasts, more sophisticated methods exist to
+assess calibration and sharpness specifically \citep{Gneiting2014}. Moreover,
+the prediction model which was used does not take into account that the original
+effect estimates may be inflated. In the statistical prediction literature, the
+phenomenon that future observations of a random quantity tend to be less extreme
+than the original observation, is commonly known as \emph{regression to the
+  mean} and usually addressed by shrinkage methods \citep{Copas1997}. This
+effect might be even more pronounced by the influence of publication bias
+\citep{Dwan2013, Kicinski2015} or questionable research practices
+\citep{Fanelli2009, John2012}. Finally, the model from \citet{Patil2016} also
+makes the naive assumption that the effect estimates from both studies are
+realizations of the same underlying effect size, however, there is often
+between-study heterogeneity \citep{Gilbert2016, McShane2019}. This can be
+caused, for example, by different populations of study participants or different
+laboratory equipment being used in the original and replication study.
+
+
+The objective of this paper is to improve on the previous statistical forecasts
+and also on their evaluation. In particular, we will develop and evaluate a
+novel prediction model which can take into account inflation of the original
+effect estimates as well as between-study heterogeneity of effects. With the
+available data from large-scale replication projects, we aim to predict the
+effect estimates of the replication studies based on the estimates from the
+original studies and knowledge of the sample size in both studies. We will
+assess the forecasts regarding discrimination, calibration, and sharpness using
+state-of-the-art evaluation methods from the statistical prediction literature.
+Finally, we will also benchmark them with the forecasts from prediction markets
+and the naive model which was used so far.
+
+It is worth pointing out that in our forecasting approach the link between
+original and replication study is based only on information from the original
+study and the sample size of the replication study. This is fundamentally
+different from approaches where the link between original and replication study
+is estimated from a training sample of past original and replication study
+pairs, as for example done recently by \citet{Altmejd2019}. Since in our
+approach no replication estimates are used to estimate any parameter, all
+evaluations presented in this paper provide ``out-of-sample'' performance
+measures, thereby eliminating the need to split the data and perform
+cross-validation.
+
+
+% Objectives and structure
+The structure of this paper is as follows: descriptive results on the data
+collected are presented in the following section. We then develop a novel model
+of effect sizes that addresses the shortcomings of the model used in previous
+analyses. Next, we compute forecasts for the collected data and systematically
+evaluate and compare them with forecasts based on the previously used model.
+Finally, the paper ends with a discussion of the results obtained.
+
+% Data
+% =============================================================================== 
+\section{Data}
+\label{sec:data}
+Data from all replication projects with a ``one-to-one'' design (\ie one
+replication for one original study) that are, to our knowledge currently
+available, were collected. In all data sets, effect estimates were provided as
+correlation coefficients ($r$). The \textsf{R} code and details on data
+preprocessing can be found in the supplement. An advantage of correlation
+coefficients is that they are bounded to the interval between minus one and one
+and are thus easy to compare and interpret. Moreover, by applying the variance
+stabilizing transformation, also known as Fisher $z$-transformation,
+$\hat{\theta} = \text{tanh}^{-1}(r)$, the transformed correlation coefficients
+become asymptotically normally distributed with their variance only being a
+function of the study sample size $n$, \ie $\Var(\hat{\theta}) = 1/(n-3)$
+\citep{Fisher1921}.
+
+\paragraph{Reproducibility Project: Psychology} 
+In the \emph{Reproducibility Project: Psychology} 100 replications of studies
+from the field of psychology were conducted \citep{Opensc2015}. The original
+studies were published in three major Psychology journals in the year 2008. Only
+the study pairs of the ``meta-analytic subset'' were used, which consists of 73
+studies where the standard error of the Fisher $z$-transformed effect estimates
+can be computed \citep{Johnson2016}.
+
+\paragraph{Experimental Economics Replication Project} 
+This project attempted to replicate 18 experimental economics studies published
+between 2011 and 2015 in two high impact economics journals \citep{Camerer2016}.
+For this project a \emph{prediction market} was also conducted in order to
+estimate the peer beliefs about whether a replication will result in a
+statistically significant result. Since the estimated beliefs are also
+probabilistic predictions, they can be compared to the probability of a
+significant replication effect estimate under the statistical prediction models.
+
+\paragraph{Social Sciences Replication Project} 
+This project involved 21 replications of studies on the social sciences
+published in the journals \emph{Nature} and \emph{Science} between 2010 and 2015
+\citep{Camerer2018}. As in the experimental economics replication project, a
+prediction market to estimate peer beliefs about the replicability of the
+original studies was conducted and the resulting belief estimates can be used as
+a comparison to the statistical predictions.
+
+\paragraph{Experimental Philosophy Replicability Project} 
+In this project, 40 replications of experimental philosophy studies were carried
+out. The original studies had to be published between 2003 and 2015 in one of 35
+journals in which experimental philosophy research is usually published (a list
+defined by the coordinators of this project) and they had to be listed on the
+experimental philosophy page of the Yale university \citep{Cova2018}. Effect
+estimates on correlation scale and effective sample size for both the original
+and replication were only available for 31 study pairs. Our analysis uses only
+this subset.
+ 
+\subsection{Descriptive results}
+Fig \ref{fig:all-descriptive} shows plots of the original versus the replication
+effect estimate, both on the correlation scale.
+\begin{figure}[!htb]
+% ==========================================================================================
+<< "plot-effects-descriptive", fig.height = 5 >>=
+# Compute summary statistics
+summaries_data <- replication_data %>% 
+  group_by(Project) %>% 
+  summarise(mean_r_OS = round(mean(r_OS), 2),
+            mean_r_RS = round(mean(r_RS), 2),
+            perc_significant = 100*round(mean(pval_RS < 0.05), 2))
+
+# Plot of r_o vs r_r
+ggplot(data = replication_data, aes(x = r_OS, y = r_RS)) +
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_abline(intercept = 0, slope = 1, col = "grey") +
+  geom_rug(aes(col = pval_RS_significant), alpha = 0.8) +
+  geom_point(aes(fill = pval_RS_significant), alpha = 0.8, size = 2, shape = 21) +
+  geom_text(data = summaries_data, parse = TRUE, size = 5, 
+            aes(x = -0.1, y = 0.9, label = paste("bar(italic(r))[o] ==~", mean_r_OS))) +
+  geom_text(data = summaries_data, parse = TRUE, size = 5,
+            aes(x = -0.1, y = 0.65, label = paste("bar(italic(r))[r] ==~", mean_r_RS))) +
+  geom_text(data = summaries_data, parse = FALSE, size = 5,
+            aes(x = 0.12, y = -0.35, label = paste(perc_significant, "% significant", sep = ""))) +
+  facet_wrap(~ Project) +
+  labs(x = expression(paste("Original effect estimate (", italic(r), ")")), 
+       y = expression(paste("Replication effect estimate (", italic(r), ")"))) +
+  lims(x = c(-0.5, 1), y = c(-0.5, 1)) + 
+  guides(fill = guide_legend(title = expression(paste("Replication ", italic("p"), "-value"))), 
+         color = FALSE) + 
+  coord_fixed() +
+  theme_bw()
+
+# plot on Fisher z-scale
+# ggplot(data = data_ma_subset, aes(x = FZ_OS, y = FZ_RS)) +
+#   geom_hline(yintercept = 0, lty = 2) +
+#   geom_abline(intercept = 0, slope = 1, col = "grey") +
+#   geom_smooth(method = "lm", fullrange = TRUE, se = FALSE) +
+#   geom_rug(aes(col = pval_RS_significant), alpha = 0.8) +
+#   geom_point(aes(fill = pval_RS_significant), alpha = 0.8, size = 2, shape = 21) +
+#   facet_wrap(~ Project) +
+#   labs(x = expression(paste("Original effect estimate (", italic(z), ")")),
+#        y = expression(paste("Replication effect estimate (", italic(z), ")"))) +
+#   guides(fill = guide_legend(title = expression(paste("Replication ", italic("p"),
+#                                                       "-value")))) +
+#   theme_bw()
+@
+% ==========================================================================================
+\caption{Original effect estimate versus replication effect estimate (on correlation scale). The color indicates whether statistical significance at the (two-sided) $0.05$ level was achieved.}
+\label{fig:all-descriptive}
+\end{figure}
+
+Most effect estimates of the replication studies are considerably smaller than
+those of the original studies. In particular, the mean effect estimates of the
+replications are roughly half as large as the mean effect estimates of the
+original studies. This is not the case for the philosophy project, however,
+where the mean effect estimate only decreased from 0.39 to 0.34. Furthermore,
+studies showing a comparable effect estimate in the replication and original
+study usually also achieved statistical significance, while studies showing a
+large decrease in the effect estimate were less likely to achieve statistical
+significance in the replication.
+
+\begin{figure}[!htb]
+<< "plot-prediction-market-descriptive", fig.height = 3 >>=
+# Plot significance of replication versus prediction market beliefs
+ggplot(data = pm_data, aes(x = pval_RS_significant, y = Market_Belief)) +
+  geom_boxplot(alpha = 0.5, fill = "lightgrey") +
+  geom_quasirandom(size = 2, shape = 21, alpha = 0.9, fill = "grey20") +
+  facet_wrap(~ Project) +
+  labs(x = expression(paste("Replication ", italic(p), "-value")), 
+       y = "Prediction market belief") +
+  lims(y = c(0, 1)) + 
+  theme_bw()
+@
+\caption{Statistical significance of replication effect estimate versus estimated prediction market beliefs about whether the replication will achieve statistical significance (at two-sided $\alpha = 0.05$).}
+\label{fig:prediction-market-descriptive}
+\end{figure}
+
+Fig~ ref{fig:prediction-market-descriptive} illustrates the elicited prediction
+market beliefs about whether the replication studies will achieve statistical
+significance. In the case of the economics data set, the distribution of the
+prediction market beliefs is very similar for significant and non-significant
+replications. In the social sciences project, on the other hand, the elicited
+beliefs separate significant and non-significant replications completely for a
+cut-off around 0.55.
+
+% Methods
+% =============================================================================== 
+\section{Methods}
+\label{sec:methods}
+To introduce some notation, denote the overall effect by $\theta$,
+study-specific underlying effects by $\theta_o$ and $\theta_r$, and their
+estimates by $\hat{\theta}_o$ and $\hat{\theta}_r$, with the subscript
+indicating whether they come from the original or the replication study. Let the
+corresponding standard errors be denoted by $\sigma_o$ and $\sigma_r$ and also
+let the heterogeneity variance be $\tau^2$. Similarly, define the variance ratio
+as $c = \sigma_o^2/\sigma_r^2$, the relative between-study heterogeneity as
+$d = \tau^2/\sigma^2_o$, and also denote the corresponding test statistics by
+$t_o = \hat{\theta}_o/\sigma_o$ and $t_r = \hat{\theta}_r/\sigma_r$. Finally,
+let $\Phi(x)$ be the cumulative distribution function of the standard normal
+distribution evaluated at $x$ and let $z_{\alpha}$ denote the $1 - \alpha$
+quantile thereof.
+
+We propose the following Bayesian hierarchical model for the effect estimates
+\begin{subequations}
+\label{eq:hierarch-model}
+\begin{align}
+\hat{\theta}_k \given \mspace{-1mu} \theta_k &\sim \Nor(\theta_k, \sigma_k^2) \label{eq:hat_theta_k} \\
+\theta_k \given \theta_{~}  &\sim \Nor(\theta, \tau^2) \label{eq:theta_k} \\
+\theta \mspace{4mu} &\sim \Nor(\mu_{\scriptscriptstyle{\theta}}, 
+                                \sigma^2_{\scriptscriptstyle{\theta}}) \label{eq:theta}
+\end{align}
+\end{subequations}
+where
+$\sigma^2_k, \tau^2, \mu_{\scriptscriptstyle{\theta}}, \sigma^2_{\scriptscriptstyle{\theta}}$
+are fixed and $k \in \{o, r\}$ (see Fig~\ref{fig:heterogeneity-model} for a
+graphical illustration).
+
+
+\begin{figure}[!htb]
+\centering
+\begin{tikzpicture}
+
+% Nodes
+% ---------
+  
+% hat(Theta_k)
+\node[obs]  (toh)  {$\hat{\theta}_o$} ; %
+\node[obs, right=12em of toh]  (trh)  {$\hat{\theta}_r$} ; %
+
+% Theta_k
+\node[latent, above=2em of toh, xshift=-1em]  (to)  {$\theta_o$} ; %
+\node[latent, above=2em of trh, xshift=-1em]  (tr)  {$\theta_r$} ; %
+
+% Sigma_k
+\node[const, above=2.5em of toh, xshift=1em]  (s2o)  {$\sigma^2_o$}  ; %
+\node[const, above=2.5em of trh, xshift=1em]  (s2r)  {$\sigma^2_r$}  ; %
+
+% Theta
+\node[latent, above=4em of to, xshift=5em]  (t)  {$\theta$} ; %
+
+% Tau
+\node[const, above=4.5em of to, xshift=7.5em]  (tau)  {$\tau^2$} ; %
+
+% Theta parameters
+\node[const, above=2.5em of t, xshift=-1em]  (mt) {$\mu_{\scriptscriptstyle{\theta}}$} ; %
+\node[const, above=2.5em of t, xshift=1em]  (s2t) {$\sigma^2_{\scriptscriptstyle{\theta}}$} ; %
+
+% Factors
+% --------
+\factor[above=of trh] {trh-f} {left:$\mathrm{N}$} {tr,s2r} {trh} ; %
+\factor[above=of toh] {toh-f} {left:$\mathrm{N}$} {to,s2o} {toh} ; %
+\factor[above=of tr] {tr-f} {right  :$\mathrm{N}$} {t,tau} {tr} ; %
+\factor[above=of to] {to-f} {left:$\mathrm{N}$} {t,tau} {to} ; %
+\factor[above=of t] {t-f} {left:$\mathrm{N}$} {mt,s2t} {t} ; %
+
+
+% Plates
+\plate {original} { %
+  (toh)(toh-f)(toh-f-caption) %
+  (s2o)(to-f)(to-f-caption) %
+} {\textsf{Original study}} ;
+
+\plate {replication} { %
+  (trh)(trh-f)(trh-f-caption) %
+  (s2r)(tr-f)(tr-f-caption) %
+} {\textsf{Replication study}} ;
+
+\end{tikzpicture}
+\vspace{1em}
+\caption{Hierarchical model of effect sizes in replication setting. Random
+  variables are encircled (and grey if they are observable).}
+\label{fig:heterogeneity-model}
+\end{figure}
+
+
+After a suitable transformation a large variety of effect size measures are
+covered by this framework (\eg mean differences, odds ratios, correlations). For
+instance, $\hat{\theta}_k = \tanh^{-1}(r_k)$ and $\sigma^2_k = 1/(n_k - 3)$ are
+used in the four data sets for our analysis. The normality assumption is also
+common to many meta-analysis methods. Together with a fixed heterogeneity
+variance $\tau^2$, it leads to analytical tractability of the predictive
+distributions. In this model, the case where effect estimates of the original
+and replication studies are not realizations of the same, but of slightly
+different underlying random variables is taken into account and controlled by
+the heterogeneity variance $\tau^2$. That is, for the limiting case
+$\tau^2 \to 0$, the study-specific underlying effects $\theta_o$ and $\theta_r$
+are assumed to be the same, while for the other extreme $\tau^2 \to \infty$,
+$\theta_o$ and $\theta_r$ are assumed to be completely unrelated. Furthermore,
+the choice of the prior distribution of $\theta$ provides additional flexibility
+to incorporate prior knowledge about the overall effect. In the following, the
+predictive distributions of the replication effect estimate under two
+interesting prior distributions are discussed.
+
+\paragraph{Flat prior}
+If the prior distribution Eq \eqref{eq:theta} is chosen to be flat, the
+posterior distribution of the overall effect $\theta$ after observing the
+original study effect estimate becomes
+$\theta \given \hat{\theta}_o \sim \Nor(\hat{\theta}_o, \sigma^2_o + \tau^2)$.
+The posterior predictive distribution of $\hat{\theta}_r$ then turns out to be
+\begin{align}
+  \hat{\theta}_r \given \hat{\theta}_o \sim \Nor\left(\hat{\theta}_o, \sigma^2_o + \sigma^2_r + 2\tau^2\right).
+  \label{eq:naive-heterogeneity}
+\end{align}
+Under this predictive model, one implicitly assumes the effect estimation in the
+original study to be unbiased, since the predictive density is centered around
+the original effect estimate. Furthermore, the uncertainty coming from the
+original and replication study, as well as the uncertainty from the
+between-study heterogeneity is taken into account. Also note that for
+$\tau^2 = 0$, Eq \eqref{eq:naive-heterogeneity} reduces to the naive model from
+\citet{Patil2016} used in previous analyses.
+
+Given this predictive model, the test statistic of the replication is distributed as 
+\begin{align}
+  t_r \given t_o \sim \Nor\left(\sqrt{c} \cdot t_o, c + 1 + 2cd\right),
+  \label{eq:dist-t_r-naive}
+\end{align}
+which only depends on the original test statistic $t_o$, the variance ratio $c$,
+and the relative heterogeneity $d$. From Eq \eqref{eq:dist-t_r-naive} one can
+easily compute the power to obtain a statistically significant result in the
+replication study. Hence, this generalizes the \emph{replication probability}
+\citep{Goodman1992, Senn2002}, \ie the probability of obtaining a statistically
+significant finding in the same direction as in the original study, to the
+setting of possible between-study heterogeneity.
+
+\paragraph{Sceptical prior}
+Instead of a flat prior, one can also choose a normal prior centered around zero
+for Eq \eqref{eq:theta}, reflecting a more sceptical belief about the overall
+effect \citep[][Chapter 5.5.2]{Spiegelhalter2004}. Moreover, we decided to use a
+parametrization of the variance parameter inspired by the $g$-prior
+\citep{Zellner1986} known from the regression literature, \ie
+$\theta \sim \Nor (0, g \cdot [\sigma^2_o + \tau^2])$ with fixed $g > 0$. A
+well-founded approach to specify the parameter $g$ when no prior knowledge is
+available is to choose it such that the marginal likelihood is maximized
+(empirical Bayes estimation). In doing so, the empirical Bayes estimate
+$\hat{g} = \max\{\hat{\theta}^2_o/(\sigma_o^2 + \tau^2) - 1, 0\} $ is obtained.
+Fixing $g$ to $\hat{g}$ and applying Bayes' theorem, the posterior distribution
+of the overall effect $\theta$ after observing the original effect estimate
+becomes
+$\theta \given \hat{\theta}_o, \hat{g} \sim \Nor (s \cdot \hat{\theta}_o, s \cdot [\sigma^2_o + \tau^2])$,
+with shrinkage factor
+\begin{align}
+\label{eq:shrinkage}
+  s = \frac{\hat{g}}{1 + \hat{g}} 
+  = \max\left\{ 
+    1 - \frac{1 + d}{t_o^2}, 0
+  \right\}.
+\end{align}
+Fig \ref{fig:shrinkage-heterogeneity} shows the shrinkage factor $s$ as a
+function of the relative between-study heterogeneity $d$ and the test statistic
+(or the two-sided $p\,$-value) of the original study. Interestingly, for
+$d = 0$, Eq~\eqref{eq:shrinkage} reduces to the factor known from the theory of
+optimal shrinkage of regression coefficients \citep{Copas1983, Copas1997}.
+
+\begin{figure}[!htb]
+<< "plot-shrinkage-factor", fig.height = 3 >>=
+# Plot showing shrinkage factor as function of t_o and d
+shrinkage_factor <- function(t_o, d) pmax(1 - (1 + d)/t_o^2, 0)
+parameters <- expand.grid(t_o = seq(0, 4.5, 0.01), 
+                          d = seq(0, 2, 0.4))
+s <- apply(parameters, 1, function(par) shrinkage_factor(t_o = par[1], d = par[2]))
+shrinkage_data_df <- data.frame(parameters, s = s)
+
+z_to_p <- function(z) 2*pnorm(z, lower.tail = FALSE)
+pval_labels <- formatPval(z_to_p(z = seq(0, 4, 1)))
+
+ggplot(data = shrinkage_data_df, aes(x = t_o, y = s, color = d, group = factor(d))) +
+  geom_line(size = 0.8, alpha = 0.8) +
+  labs(x = expression(italic(t)[o]), y = expression(italic(s))) +
+  guides(color = guide_colorbar(title = expression(~~italic(d)))) +
+  scale_color_viridis_c() + 
+  scale_x_continuous(sec.axis = sec_axis(trans = ~z_to_p(.), breaks = z_to_p(seq(0, 4, 1)), 
+                                         labels = pval_labels, name = expression(italic(p)[o])),
+                     breaks = seq(0, 4, 1))  +
+  ylim(0, 1) +
+  theme_bw()
+@
+\caption{Shrinkage factor $s$ as function of the test statistic $t_o$ (bottom
+  axis) and the two-sided $p\,$-value $p_o$ (top axis) of the original study and
+  the relative between-study heterogeneity $d = \tau^2/\sigma^2_o$.}
+\label{fig:shrinkage-heterogeneity}
+\end{figure}
+
+
+
+The posterior predictive distribution of $\hat{\theta}_r$ under this model
+becomes
+\begin{align}
+  \hat{\theta}_r \given \hat{\theta}_o \sim 
+  \Nor \left(s \cdot \hat{\theta}_o, s \cdot (\sigma_o^2 + \tau^2) + \sigma_r^2 + \tau^2\right).
+  \label{shrinkage-heterogeneity}
+\end{align}
+The promise of this method is that shrinkage towards zero should improve
+predictive performance by counteracting the regression to the mean effect. As
+such, shrinkage also counteracts effect estimate inflation caused by publication
+bias to some extent. That is, the contribution of the original effect estimate
+to the predictive distribution shrinks depending on the amount of evidence in
+the original study (\emph{evidence-based shrinkage}). The less convincing the
+result from the original study, \ie the smaller $t_o$, the more shrinkage
+towards zero. On the other hand, shrinkage decreases for increasing evidence and
+in the limiting case the predictive distribution is the same as under the flat
+prior, \ie $s \to 1$ for $t_o \to \infty$. Moreover, the shrinkage factor in Eq
+\eqref{eq:shrinkage} is also influenced by the ratio $d/t_o^2$. If the test
+statistic is not substantially larger than the relative between-study
+heterogeneity, \ie $t_o^2 \not\gg d$, heterogeneity also induces shrinkage
+towards zero.
+
+Based on this predictive model, the distribution of the test statistic of the
+replication study
+\begin{align}
+  t_r \given t_o \sim \Nor\left(s \cdot \sqrt{c} \cdot t_o, s \cdot(c + cd) + 1 + cd\right),
+  \label{eq:dist-t_r-shrinkage}
+\end{align}
+depends only on the relative quantities $c$, $d$, and $t_o$. From Eq
+\eqref{eq:dist-t_r-shrinkage}, it is again straightforward to compute the power
+for a significant replication outcome.
+
+\begin{figure}[!htb]
+<< "plot-probability-significance", fig.height = 5, eval = TRUE >>=
+# Function to compute predictive density/cdf 
+predict_t_r <- function(x, t_o, c, d, shrinkage = FALSE) {
+  if (shrinkage == TRUE) s <- pmax(1 - (1 + d)/t_o^2, 0)
+  else s <- 1
+  mu <- s*t_o*sqrt(c)
+  sigma <- sqrt(s*(c + d*c) + 1 + d*c)
+  return(pnorm(q = x, mean = mu, sd = sigma, lower.tail = FALSE))
+}
+
+# Apply function to parameter grid
+parameters <- expand.grid(t_o = seq(0, 4.5, 0.01), 
+                          c = c(0.5, 1, 2, 4), 
+                          d = c(0, 1), 
+                          shrinkage = c(FALSE, TRUE))
+probabilities <- apply(parameters, 1, function(par) {
+  power <- predict_t_r(x = qnorm(0.975), t_o = par[1], c = par[2], d = par[3], shrinkage = par[4])
+  data.frame(power = power, t_o = par[1], c = par[2], d = par[3], shrinkage = par[4])
+}) %>% 
+  bind_rows() %>% 
+  mutate(Method = case_when(d == 0 & shrinkage == 0 ~ "N",
+                            d == 0 & shrinkage == 1 ~ "S",
+                            d == 1 & shrinkage == 0 ~ "H",
+                            d == 1 & shrinkage == 1 ~ "SH"),
+         Method = factor(Method, levels = levels_methods, 
+                         labels = c("Naive", "Shrinkage", "Heterogeneity", 
+                                    "Shrinkage + Heterogeneity")))
+colors_fig5 <- c("Naive" = "#F8766D",
+                 "Heterogeneity" = "#7CAE00",
+                 "Shrinkage" = "#00BFC4",
+                 "Shrinkage + Heterogeneity" = "#C77CFF")
+# Plot of estimated probabilities of stat. significance in replication
+pval_labels <- formatPval(z_to_p(seq(0, 4, 1)))
+ggplot(data = probabilities, aes(x = t_o, y = power, color = Method)) + 
+  geom_vline(xintercept = qnorm(0.975), lty = 2, alpha = 0.8) + 
+  geom_line(alpha = 0.9, size = 0.8) +
+  labs(x = expression(italic(t[o])), y = "Pr(Replication significant)") + 
+  facet_wrap(~ c, ncol = 2, labeller = label_bquote(italic(c) ==~ .(round(c, 2)))) +
+    scale_x_continuous(sec.axis = sec_axis(trans = ~z_to_p(.), breaks = z_to_p(seq(0, 4, 1)), 
+                                           labels = pval_labels, name = expression(italic(p)[o])),
+                       breaks = seq(0, 5, 1))  +
+  scale_color_manual(values = colors_fig5) +
+  theme_bw() + 
+  theme(legend.position = "bottom")
+@
+\caption{Probability of a significant replication outcome in the same direction
+  as in the original study (\emph{replication probability}) at (two-sided)
+  $\alpha = 0.05$ level as a function of the test statistic $t_o$ (bottom axis)
+  and $p\,$-value $p_o$ (top axis) of the original study and variance ratio
+  $c = \sigma^2_o/\sigma^2_r$. The dashed line indicates
+  $z_{\scriptscriptstyle{0.025}} \approx 1.96$. In the case of heterogeneity,
+  $d = \tau^2/\sigma^2_o$ is set to one, otherwise to zero.}
+\label{fig:ch2-prob-significant}
+\end{figure}
+
+Fig~\ref{fig:ch2-prob-significant} shows the replication probability as a
+function of the original test statistic $t_o$ (or two-sided $p\,$-value $p_o$)
+and for different values of the variance ratio $c$. Note that the curves of the
+shrinkage methods stay constant until $t_o$ reaches a point where Eq
+\eqref{eq:shrinkage} starts to become larger than zero. If the original study
+showed a ``just significant result'' ($t_o \approx 1.96$) and the precision is
+equal in the original and the replication study ($c = 1$), the replication
+probability is just 0.5 when a flat prior is used. This surprising result was
+already noted two decades ago \citep{Goodman1992}, yet it has not become part of
+statistical literacy and many practitioners of statistics are still perplexed
+when they hear about it. If a sceptical prior is used, the replication
+probability becomes even lower. Moreover, when the precision of the replication
+is smaller ($c < 1$), the replication probability is also lower, whereas with
+increased precision ($c > 1$) the replication probability also increases.
+Finally, for small $t_o$ the replication probability is higher when there is
+heterogeneity compared to when there is no heterogeneity, while the opposite is
+true for large $t_o$.
+
+\subsection{Specification of the heterogeneity variance}
+One needs to specify a value for the heterogeneity variance $\tau^2$ to compute
+predictions of $\hat{\theta}_r$. However, it is not possible to estimate
+$\tau^2$ using only the data from the original study, since the overall effect
+$\theta$ in the marginal likelihood of
+$\hat{\theta}_o \given \theta \sim \Nor(\theta, \sigma_o^2 + \tau^2)$ is also
+unknown.
+
+Ideally, a domain expert would carefully assess original study and replication
+protocol, and then specify how much heterogeneity can be expected for each study
+pair individually. This is, however, beyond the scope of this work. We instead
+want to compare forecasts that use a positive ``default value'' of $\tau^2$ to
+forecasts for which $\tau^2$ is set to zero. The goal is then to assess whether
+or not it makes a difference in predictive performance when heterogeneity is
+taken into account. Of course we will also investigate how robust our
+conclusions are to the choice of the default value for $\tau^2$ by conducting a
+sensitivity analysis (see Section \ref{sec:sensitivity}).
+
+To determine the value of $\tau^2$, we adapted an approach originally proposed
+to determine plausible values for $\tau^2$ of heterogeneous log odds ratio
+effects \citep[][Chapter 5.7.3, P. 168]{Spiegelhalter2004}: Based on the
+proposed hierarchical model Eq \eqref{eq:hierarch-model}, 95\% of the
+study-specific underlying effects $\theta_k, k \in \{o, r\}$ should lie within
+the interval $\theta \pm z_{\scriptscriptstyle{0.025}} \cdot \tau$. We want to
+specify a value for $\tau$, such that the range of this interval is not zero,
+but also not very large, because the whole purpose of a replication study is to
+replicate an original experiment as closely as possible. The comparison of the
+limits of this interval is, however, easier if they are transformed to the
+correlation scale, since $\theta_k$ are a Fisher $z$-transformed correlations
+$\theta_k = \tanh^{-1}(r_k)$ in all used data sets. We therefore looked at the
+difference of the transformed 97.5\% to the transformed 2.5\% quantile,
+$\delta(\tau) = \tanh(\theta_{k, 97.5\%}) - \tanh(\theta_{k, 2.5\%})$ as a
+function of the heterogeneity parameter $\tau$ for an overall effect of
+$\theta = 0$ (Fig \ref{fig:tau-r-classification}). We then chose a value for
+$\tau$ that lead to a plausible value of $\delta(\tau)$.
+
+\begin{figure}[!htb]
+<< "plot-tau-r-difference", fig.height = 2.5 >>=
+quantile_difference <- function(tau, lower = 0.025, upper = 0.975) {
+  # for given heterogeneity tau, returns difference of quantiles upper - lower
+  # after transformation with tanh
+  l <- qnorm(lower)
+  u <- qnorm(upper)
+  corr_diff <- tanh(tau*u) - tanh(tau*l)
+  return(corr_diff)
+}
+find_tau_difference <- function(diff, lower = 0.025, upper = 0.975) {
+  root_fun <- function(t) quantile_difference(tau = t, lower = lower, upper = upper) - diff
+  tau <- uniroot(f = root_fun, lower = 0, upper = 100)$root
+  return(tau)
+}
+r_classification <- data.frame(size = c("small", "medium", "large"),
+                               r = c(0.1, 0.3, 0.5))
+r_classification$tau <- sapply(r_classification$r, function(r) find_tau_difference(diff = r))
+
+# Plot of relationship between tau hyperparameter and difference of 97.5% to 2.5% quantile
+# of backtransformed correlations r = tanh(theta_k)
+taus <- seq(0, 0.7, 0.01)
+tau_difference <- data.frame(tau = taus,
+                             diff = sapply(taus, quantile_difference))
+ggplot(data = tau_difference, aes(x = tau, y = diff)) +
+  geom_line() +
+  geom_segment(data = r_classification, aes(x =  tau, xend = tau, y = 0, yend = r), lty = 3) +
+  geom_segment(data = r_classification, aes(x =  0, xend = tau, y = r, yend = r), lty = 3) +
+  geom_text(data = r_classification, aes(x = -0.03, y = r, label = size), size = 3) +
+  labs(x = bquote(tau), y = expression(delta(tau))) +
+  scale_x_continuous(breaks = c(0, round(r_classification$tau, 2), seq(0.25, 1, 0.25)),
+                     labels = c("0", round(r_classification$tau, 2), seq(0.25, 1, 0.25)),
+                     minor_breaks = NULL) +
+  theme_bw()
+@
+\caption{Difference between backtransformed quantiles $\delta(\tau) = \tanh(\theta_{k, 97.5\%}) - \tanh(\theta_{k, 2.5\%})$ as a function of between-study heterogeneity $\tau$ for $\theta = 0$. The values corresponding to small, medium, and large correlation effect sizes according to the classification by Cohen \citep{Cohen1992} are depicted by dotted lines.}
+\label{fig:tau-r-classification}
+\end{figure}
+
+However, this raises the question of how one should classify these differences
+and which value should be chosen for the current setting. In the context of
+power analysis, there exist many classifications of effect size magnitudes, \eg
+the one by Cohen \citep{Cohen1992}. We think this classification is appropriate
+since it was developed to characterize effects in psychology and other social
+sciences, the fields from which the data at hand are. In this classification a
+medium effect size should reflect an effect which is ``visible to the eye''
+($r = 0.3$), a small effect size should be smaller but not trivial ($r = 0.1$),
+and a large effect size should have the same difference to the medium effect
+size as the small effect size, but in the other direction ($r = 0.5$). For
+direct replication studies, we think it is reasonable to assume that the
+between-study heterogeneity should not be very large, because these kinds of
+studies are usually matched as closely as possible to the original studies. We
+therefore chose $\tau = 0.08$, such that $\delta(\tau)$, the difference between
+the 97.5\% and 2.5\% quantiles of the study-specific underlying effects, is not
+larger than the size of a medium effect.
+
+An alternative approach would be to use empirical heterogeneity estimates known
+from the literature. We therefore also compared the chosen value to the
+empirical distribution of 497 between-study heterogeneity estimates of
+meta-analyses with correlation effect sizes in the journal \emph{Psychological
+Bulletin} between 1990 and 2013 \citep{VanErp2017} (see the supplement
+for details). The value of 0.08 corresponds to the 34\% quantile of the
+empirical distribution, which we think is reasonable as those estimates stem
+from meta-analyses of ordinary studies that are likely to be more heterogeneous
+than direct replication studies.
+
+
+% ===============================================================================
+\subsection{Predictive evaluation methods}
+% ===============================================================================
+A large body of methodology is available to assess the quality of probabilistic
+forecasts. When comparing the actual observations with their predictive
+distributions, one can distinguish different aspects. \emph{Discrimination}
+characterizes how well a model is able to predict different observations.
+\emph{Calibration}, on the other hand, describes the statistical agreement of
+the whole predictive distribution with the actual observations, \ie they should
+be indistinguishable from randomly generated samples from the predictive
+distribution. One can also assess \emph{sharpness} of the predictions, \ie the
+concentration of the predictive distribution \citep{Gneiting2014}.
+
+\emph{Proper scoring rules} are an established way to assess calibration and
+sharpness of probabilistic forecasts simultaneously. We therefore computed the
+mean logarithmic (LS), quadratic (QS), and continuous ranked probability score
+(CRPS) for continuous predictive distributions \citep{Gneiting2007b}, and the
+mean (normalized) Brier score (BS) for binary predictive distributions
+\citep{Schmid2005}. In order to specifically evaluate calibration, several
+methods were used: First, calibration tests based on scoring rules were
+conducted, \ie \emph{Spiegelhalter's $z$-test} \citep{Spiegelhalter1986} for
+forecasts with a binary target and four calibration tests based on LS and CRPS
+\citep{Held2010} for forecasts with a continuous target. All of these tests
+exploit the fact that under the null hypothesis of perfect calibration, the
+distribution of certain scores can be determined. Second, the \emph{probability
+integral transform} (PIT), \ie the value of the predictive cumulative
+distribution function evaluated at the actual observed value, was computed for
+each forecast. Under perfect calibration, the PIT values should be uniformly
+distributed which can be assessed visually, as well as with formal tests
+\citep{Gneiting2007b}. Third, the \emph{calibration slope} method was used to
+evaluate calibration by regressing the actual observations on their predictions,
+\ie for forecasts with a binary target using logistic regression. A well
+calibrated prediction model should lead to a regression slope $\beta \approx 1$,
+whereas $\beta > 1$ and $\beta < 1$ indicate miscalibration \citep{Cox1958}.
+Finally, to assess the discriminative quality of the forecasts with a binary
+target, the \emph{area under the curve} (AUC) was computed \citep[][Chapter
+15.2.3]{Steyerberg2009}.
+
+\subsection{Software}
+All analyses were performed in the \textsf{R} programming language \citep{R}.
+The full code to reproduce analyses, plots, and tables is provided in
+the supplement. Methods to compute prediction intervals and to conduct
+sample size calculations (see the supplement for details), as well as the
+four data sets are provided in the \textsf{R} package
+\texttt{ReplicationSuccess} which is available at
+\url{https://r-forge.r-project.org/projects/replication/}.
+
+\section{Results}
+\label{sec:results}
+In this section, predictive evaluations of four different forecasting methods
+applied to the data sets are shown: the method with the flat prior and
+$\tau = 0$, corresponding to the previously used method from \citet{Patil2016}
+(denoted by N for \emph{naive}), the method with the flat prior and
+$\tau = 0.08$ (denoted by H for \emph{heterogeneity}), the method with the
+sceptical prior and $\tau = 0$ (denoted by S for \emph{shrinkage}), and the
+method with the sceptical prior and $\tau = 0.08$ (denoted by SH for
+\emph{shrinkage and heterogeneity}).
+
+\subsection{Forecasts of effect estimates}
+In the following, evaluations of forecasts of the replication effect estimates
+are shown.
+
+\begin{figure}[!htb]
+<< "plot-prediction-intervals", fig.height = 7 >>=
+# Helper function to compute prediction intervals for all methods
+get_PIs <- function(theta_o, sigma_o, sigma_r, tau = tau_default, gamma = 0.95) {
+  params <- get_params_all_methods(theta_o = theta_o, sigma_o = sigma_o, sigma_r = sigma_r, tau = tau)
+  result <- lapply(seq_along(params), function(i) {
+    data.frame("PI_lower" = qnorm(p = (1 - gamma)/2, mean = params[[i]]$mu, sd = params[[i]]$sigma),
+               "PI_upper" = qnorm(p = (1 + gamma)/2, mean = params[[i]]$mu, sd = params[[i]]$sigma),
+               "Method" = names(params)[i])
+  })
+  result_df <- do.call(rbind, result)
+  return(result_df)
+}
+
+# Compute 95% prediction intervals 
+PI <- with(replication_data, get_PIs(theta_o = FZ_OS, sigma_o = FZ_se_OS, sigma_r = FZ_se_RS))
+PI_df <- data.frame(PI, replication_data) %>%
+  mutate(Method = factor(Method, levels = levels_methods),
+         within = (FZ_RS > PI_lower) & (FZ_RS < PI_upper),
+         within = factor(within, labels = c("Outside prediction interval", 
+                                            "Within prediction interval")),
+         PI_lower_r = tanh(PI_lower),
+         PI_upper_r = tanh(PI_upper))
+
+# Compute coverage
+summary_PI <- PI_df %>% 
+  group_by(Project, Method) %>% 
+  summarise(prop_within = round(mean(within == "Within prediction interval"), 2),
+            prop_within = paste(prop_within*100, "% coverage", sep = ""))
+
+# Plot of r_o vs r_r showing 95% prediction intervals and coverage
+ggplot(PI_df, aes(x = r_OS, y = r_RS)) +
+  geom_hline(yintercept = 0, lty = 2) + 
+  geom_abline(intercept = 0, slope = 1, lty = 1) + 
+  geom_pointrange(aes(ymin = PI_lower_r, ymax = PI_upper_r, col = within), size = 0.6, 
+                  alpha = 0.8, fatten = 1.5, key_glyph = "point") +
+  geom_point(alpha = 0.5, size = 0.3) +
+  geom_text(data = summary_PI, aes(x = 0.35, y = 0.93, label = prop_within), size = 4) + 
+  labs(x = expression(paste("Original effect estimate (", italic(r), ")")), 
+       y = expression(paste("Replication effect estimate (", italic(r), ")"))) +
+  scale_x_continuous(breaks = c(0, 0.5, 1), limits = c(0, 1)) + 
+  scale_color_manual(within, values = c("Outside prediction interval" = "darkred",
+                                        "Within prediction interval" = "gray60")) + 
+  facet_grid(Project ~ Method) +
+  theme_bw() +
+  theme(strip.text = element_text(size = 8), legend.position = "bottom") +
+  guides(color = guide_legend(title = NULL))
+@
+\caption{Original and replication effect estimates with 95\% prediction
+  intervals of the replication effect estimates (vertical lines). Forecasting
+  methods are abbreviated by N for \emph{naive}, S for \emph{shrinkage}, H for
+  \emph{heterogeneity}, SH for \emph{shrinkage and heterogeneity}.}
+\label{fig:pred-interval}
+\end{figure}
+
+\paragraph{Prediction intervals}
+Fig \ref{fig:pred-interval} shows plots of the original versus the replication
+effect estimates. In addition, the corresponding 95\% prediction interval is
+vertically shown around each study pair. Comparing the different methods across
+projects, the S method shows similar coverage as the N method in the economics
+and philosophy data sets (83 - 84\%), whereas in the psychology and social
+sciences data sets the S method (75 - 76\%) shows a higher coverage compared to
+the N method (67 - 70\%). As expected, when heterogeneity is taken into account,
+the prediction intervals become wider and the coverage improves considerably in
+all cases. In the philosophy and economics projects the highest coverage is
+achieved for the forecasts from the H method (94\%), while in the psychology and
+social sciences projects the highest coverage is achieved for the SH forecasts
+(88 - 95\%). Moreover, in all but the psychology data set, the best method is
+able to achieve nominal coverage, whereas in the psychology data set the best
+method achieves slightly less. These improvements suggest improved calibration
+of the forecasts which take heterogeneity into account (and shrinkage in the
+case of the social sciences and psychology data sets). Finally, in the
+psychology and social sciences projects, the replication effect estimates that
+are not covered by their prediction intervals tend to be smaller than the lower
+limits of the intervals. In the economics and philosophy projects, on the other
+hand, the non-coverage appears to be more symmetric.
+
+
+\paragraph{Scores}
+Table \ref{table:mean-scores-continuous} shows the mean quadratic score (QS),
+mean logarithmic score (LS), and the mean continuous ranked probability score
+(CRPS) for each combination of data set and forecasting method. The SH method
+achieved the lowest mean score for each score type and in all projects,
+suggesting that this method performs the best among the four methods. The N
+method, on the other hand, usually showed the highest mean score across all
+score types, indicating that this method performs worse compared to the other
+methods. We also tested for deviation from equal predictive performance using
+paired tests and in most cases there is evidence that the difference between the
+scores of the SH forecasts and the scores of the other forecasts is substantial
+(see the supplement for details).
+
+\begin{table}[!hbt]
+\centering
+\caption{Mean quadratic score (QS), mean logarithmic score (LS), mean continuous
+  ranked probability score (CRPS), and harmonic mean of $p\,$-values from four
+  score-based calibration tests ($\mathring{p}$). Forecasting methods are
+  abbreviated by N for \emph{naive}, S for \emph{shrinkage}, H for
+  \emph{heterogeneity}, SH for \emph{shrinkage and heterogeneity}.}
+\label{table:mean-scores-continuous}
+<< "table-scores-calibration", results = "asis" >>=
+# Proper scoring rules
+# ----------------------------------------------------------------------------------
+# Helper functions for proper scoring rules for gaussian predictive distribution
+QS <- function(mu, sigma, y) -2/sigma*dnorm(x = (y - mu)/sigma) + 1/(2*sqrt(pi)*sigma)
+
+LS <- function(mu, sigma, y) (y - mu)^2/(2*sigma^2) + log(sigma) + 0.5*log(2*pi)
+
+CRPS <- function(mu, sigma, y) {
+  sigma*((y - mu)/sigma*(2*pnorm(q = (y - mu)/sigma) - 1) + 2*dnorm(x = (y - mu)/sigma) - 1/sqrt(pi))
+}
+
+gaussian_scores <- list("QS" = QS, 
+                        "LS" = LS, 
+                        "CRPS" = CRPS)
+
+get_scores <- function(theta_o, theta_r, sigma_o, sigma_r, tau = tau_default, 
+                       scoring_rules = gaussian_scores) {
+  params <- get_params_all_methods(theta_o = theta_o, sigma_o = sigma_o, 
+                                   sigma_r = sigma_r, tau = tau)
+  scores <- lapply(seq_along(scoring_rules), function(i) {
+    score_i <- lapply(params, function(method) {
+      scoring_rules[[i]](mu = method$mu, sigma = method$sigma, y = theta_r)
+    })
+    data.frame(score_i, "Type" = names(scoring_rules)[i])
+  })
+  scores_df <- do.call(rbind, scores)
+  return(scores_df)
+}
+
+# Compute mean scores
+scores <- with(replication_data, get_scores(theta_o = FZ_OS, theta_r = FZ_RS, 
+                                            sigma_o = FZ_se_OS, sigma_r = FZ_se_RS))
+mean_score_data <- data.frame(scores, replication_data) %>% 
+  gather(key = "Method", value = "Score", levels_methods) %>% 
+  group_by(Project, Method, Type) %>%
+  summarise(mean_Score = mean(Score),
+            SE_mean_Score = sd(Score)/sqrt(n())) %>% 
+  ungroup()
+
+
+# Calibration tests from Held, Rufibach, Balabdaoui (2010)
+# ----------------------------------------------------------------------------------
+# Note: LS/DSS scoring rules without constant terms were used in paper, 
+# whereas the definitions in Gneiting & Katzfuss (2014) involve also constants
+
+# Unconditional Calibration tests
+score_calib_test <- function(theta_o, theta_r, sigma_o, sigma_r, tau = tau_default) {
+  # scoring rules according to definitions in paper
+  scoring_rules_test <- list("LS" = function(mu, sigma, y)  0.5*(log(sigma^2) + ((y - mu)/sigma)^2), 
+                             "CRPS" = CRPS)
+  scores <- get_scores(theta_o = theta_o, theta_r = theta_r, sigma_o = sigma_o, 
+                       sigma_r = sigma_r, tau = tau, scoring_rules = scoring_rules_test)
+  params <- get_params_all_methods(theta_o = theta_o, sigma_o = sigma_o, sigma_r = sigma_r, tau = tau)
+  n <- length(theta_o)
+  
+  test_log <- lapply(seq(ncol(scores) - 1), function(i) {
+    mean_LS <- mean(scores[scores$Type == "LS",i])
+    expectation <- 0.5 + mean(log(params[[i]]$sigma))
+    variance <- 1/(2*n)
+    test_statistic <- (mean_LS - expectation)/sqrt(variance)
+    test_pvalue <- 2*pnorm(q = abs(test_statistic), lower.tail = FALSE)
+    data.frame("t" = test_statistic, "pvalue" = test_pvalue, "Test" = "LS", 
+               "Method" = colnames(scores)[i])
+  })
+  test_crps <- lapply(seq(ncol(scores) - 1), function(i) {
+    mean_CRPS <- mean(scores[scores$Type == "CRPS",i])
+    expectation <- 1/sqrt(pi)*mean(params[[i]]$sigma)
+    variance <- 0.1627516/n^2 * sum(params[[i]]$sigma^2)
+    test_statistic <- (mean_CRPS - expectation)/sqrt(variance)
+    test_pvalue <- 2*pnorm(q = abs(test_statistic), lower.tail = FALSE)
+    data.frame("t" = test_statistic, "pvalue" = test_pvalue, "Test" = "CRPS", 
+               "Method" = colnames(scores)[i])
+  })
+  tests_df <- do.call(rbind, c(test_log, test_crps))
+  return(tests_df)
+}
+
+# Score regression calibration tests
+# 1) DSS_i = a + b*log(sigma_i) + e_i 
+# ===> e_i homoscedastic, H0: a = 0.5, b = 1
+# 2) CRPS_i = c + d*sigma_i + e_i 
+# ===> e_i heteroscedastic (w_i = 1/sigma^2_i), H0: c = 0, d = 1/sqrt(pi)
+score_calib_regr_test <- function(theta_o, theta_r, sigma_o, sigma_r, tau = tau_default) {
+  # scoring rules according to definitions in paper 
+  scoring_rules_test <- list("DSS" = function(mu, sigma, y) 0.5*(log(sigma^2) + ((y - mu)/sigma)^2), 
+                             "CRPS" = CRPS)
+  scores <- get_scores(theta_o = theta_o, theta_r = theta_r, sigma_o = sigma_o, 
+                       sigma_r = sigma_r, tau = tau, scoring_rules = scoring_rules_test)
+  params <- get_params_all_methods(theta_o = theta_o, sigma_o = sigma_o, 
+                                   sigma_r = sigma_r, tau = tau)
+  
+  test_dss <- lapply(seq(ncol(scores) - 1), function(i) {
+    dss_i <- scores[scores$Type == "DSS",i]
+    sigma_i <- params[[i]]$sigma
+    fit_dss_i <- lm(dss_i ~ 1 + log(sigma_i))
+    ab_diff_i <- matrix(coef(fit_dss_i) - c(0.5, 1))
+    statistic <- t(ab_diff_i) %*% solve(vcov(fit_dss_i)) %*% ab_diff_i
+    test_pvalue <- pchisq(q = statistic, 2, lower.tail = FALSE)
+    data.frame("t" = statistic, "pvalue" = test_pvalue, 
+               "Test" = "DSS-Regression", "Method" = colnames(scores)[i])
+  })
+  test_crps <- lapply(seq(ncol(scores) - 1), function(i) {
+    crps_i <- scores[scores$Type == "CRPS",i]
+    sigma_i <- params[[i]]$sigma
+    fit_crps_i <- lm(crps_i ~ 1 + sigma_i, weights = 1/sigma_i^2)
+    cd_diff_i <- matrix(coef(fit_crps_i) - c(0, 1/sqrt(pi)))
+    statistic <- t(cd_diff_i) %*% solve(vcov(fit_crps_i)) %*% cd_diff_i
+    test_pvalue <- pchisq(q = statistic, 2, lower.tail = FALSE)
+    data.frame("t" = statistic, "pvalue" = test_pvalue, 
+               "Test" = "CRPS-Regression", "Method" = colnames(scores)[i])
+  })
+  tests_df <- do.call(rbind, c(test_dss, test_crps))
+  return(tests_df)
+}
+
+# Conduct score based calibration tests
+miscalibtest_df <- lapply(unique(replication_data$Project), function(project) {
+  tmp_data <- replication_data[replication_data$Project == project,]
+  test1 <- with(tmp_data, score_calib_test(theta_o = FZ_OS, theta_r = FZ_RS, 
+                                           sigma_o = FZ_se_OS, sigma_r = FZ_se_RS))
+  test2 <- with(tmp_data, score_calib_regr_test(theta_o = FZ_OS, theta_r = FZ_RS, 
+                                                sigma_o = FZ_se_OS, sigma_r = FZ_se_RS))
+  data.frame(rbind(test1, test2), Project = project)
+}) %>% 
+  bind_rows()
+
+# Summarize 5 tests with harmonic mean of p-values
+harmonic_mean <- function(x) 1/(mean(1/x))
+# hmean_pval_df <- rbind(miscalibtest_df, PIT_ks) %>%
+hmean_pval_df <- rbind(miscalibtest_df) %>%
+  group_by(Project, Method) %>% 
+  summarise(hmean_pval = harmonic_mean(pvalue)) %>% 
+  ungroup()
+
+# Create table with scores and harmonic mean of p-values
+score_table_df <- mean_score_data %>% 
+  left_join(hmean_pval_df, by = c("Project", "Method")) %>% 
+  mutate(Project = factor(Project, levels = levels_projects),
+         Method = factor(Method, levels = levels_methods),
+         Type = factor(Type, levels = levels_scores))
+
+score_table <- tabular(Project * Method ~ ((Type*Heading()*mean_Score)*
+                       Format(digits = 1) + formatPval(hmean_pval)*Justify(c,l))*
+                       Heading()*identity, data = score_table_df)
+colLabels(score_table)[1:1] <- "Score Type"
+colLabels(score_table)[2,1:3] <- levels_scores
+colLabels(score_table)[2,4] <- "$\\mathring{p}$"
+rowLabels(score_table)[2,1] <- "$n = 18$"
+rowLabels(score_table)[6,1] <- "$n = 31$"
+rowLabels(score_table)[10,1] <- "$n = 73$"
+rowLabels(score_table)[14,1] <- "$n = 21$"
+toKable(score_table, booktabs = TRUE)
+@
+\end{table}
+
+\paragraph{Calibration tests}
+A total of four score-based calibration tests have been performed. These tests
+exploit the fact that for normal predictions under the null hypothesis of
+perfect calibration, the first two moments of the distribution of the mean LS
+and the mean CRPS can be derived and appropriate unconditional calibration tests
+can be constructed. Moreover, the functional relationship between the two
+moments can be used to define a regression model in which the individual scores
+are regressed on their (suitably transformed) predictive variances leading to
+another procedure to test for miscalibration \citep{Held2010}. A theoretically
+well-founded way to summarize the $p\,$-values of these tests is to use their
+harmonic mean $\mathring{p}$ \citep{Good1958, Wilson2019, Held2019c}, which is
+also shown in Table \ref{table:mean-scores-continuous} (see
+the supplement for non-summarized results).
+
+Taken together, there is strong evidence for miscalibration of all forecasts in
+the psychology and social sciences projects. In the economics project, on the
+other hand, there is no evidence for miscalibration of the H and SH forecasts
+and weak evidence for miscalibration of the other forecasts. Finally, in the
+philosophy project there is strong evidence for miscalibration of the N and S
+forecasts and no evidence for miscalibration of the H and SH forecasts.
+
+\paragraph{PIT histograms}
+Fig \ref{fig:pit} shows histograms of the PIT values of the four forecasting
+methods along with $p\,$-values from Kolmogorov-Smirnov tests for uniformity.
+
+\begin{figure}[!htb]
+<< "plot-PIT", fig.height = 5 >>=
+# Helper function to compute PIT
+get_PITs <- function(theta_o, theta_r, sigma_o, sigma_r, tau = tau_default) {
+  params <- get_params_all_methods(theta_o = theta_o, sigma_o = sigma_o, 
+                                   sigma_r = sigma_r, tau = tau)
+  PITs <- lapply(seq_along(params), function(i) {
+    data.frame("PIT" = pnorm(q = theta_r, mean = params[[i]]$mu, sd = params[[i]]$sigma),
+               "Method" = names(params)[i])
+    })
+  PITs_df <- do.call(rbind, PITs)
+  return(PITs_df)
+}
+
+# Compute PITs
+PITs <- with(replication_data, get_PITs(theta_o = FZ_OS, theta_r = FZ_RS, 
+                                        sigma_o = FZ_se_OS, sigma_r = FZ_se_RS))
+PIT_data <- cbind(replication_data, PITs)
+
+# Test with Kolmogorov Smirnov test whether PIT values deviate from U(0, 1)
+options(scipen = 5)
+n_breaks <- 8
+PIT_ks <- PIT_data %>% 
+  group_by(Project, Method) %>% 
+  summarise(t = ks.test(PIT, y = "punif", 0, 1, exact = TRUE)$statistic,
+            pvalue = ks.test(PIT, y = "punif", 0, 1, exact = TRUE)$p.value,
+            Test = "KS",
+            uniform_count = n()/n_breaks) %>% 
+  ungroup() %>% 
+  mutate(pstring = ifelse(pvalue < 0.0001, "italic(p)", "italic(p) == ~"),
+         pvalue = paste(pstring, formatPval(pvalue)))
+
+# Plot histograms of PITs
+ggplot(data = PIT_data, aes(x = PIT)) + 
+  geom_histogram(breaks = seq(0, 1, length.out = n_breaks), col = 1, fill = "darkgrey") + 
+  geom_text(data = PIT_ks, aes(x = Inf, y = Inf, label = pvalue), 
+            hjust = 1.1, vjust = 1.3, parse = TRUE) +
+  geom_hline(data = PIT_ks, aes(yintercept = uniform_count), lty = 2, alpha = 0.7) +
+  facet_grid(Project ~ Method, scales = "free_y") +
+  labs(x = "PIT", y = "Count") +
+  scale_x_continuous(breaks = seq(0, 1, 0.25), labels = c("0.0", seq(0.25, 0.75, 0.25), "1.0")) +
+  theme_bw() + 
+  theme(strip.text.x = element_text(size = 8), strip.text.y = element_text(size = 6),
+        axis.text = element_text(size = 8))
+@
+\caption{Histograms of PIT values with $p$-values from Kolmogorov-Smirnov test
+  for uniformity. Dashed lines indicate number of counts within bins expected
+  under uniformity. Forecasting methods are abbreviated by N for \emph{naive}, S
+  for \emph{shrinkage}, H for \emph{heterogeneity}, SH for \emph{shrinkage and
+    heterogeneity}.}
+\label{fig:pit}
+\end{figure}
+
+In some of the histograms in the social sciences and economics projects there
+are bins with zero observations, however, these projects also have the smallest
+sample sizes. In the psychology and social sciences data sets, the N method
+shows extreme bumps in the lower range of the PIT values, while the histograms
+of the H, S, and SH methods look flatter, suggesting less miscalibration. In the
+economics data set, the PIT histograms also show bumps in the lower range, but
+to a much lower degree than in the psychology and social sciences data sets.
+Finally, in the philosophy data set the histograms look acceptable for all
+methods, suggesting no severe miscalibration.
+
+
+\subsection{Forecasts of statistical significance}
+Since statistical significance of the replication study is one of the most
+commonly used criteria for replication success, in the following section the
+probability of significance under the investigated predictive distributions will
+be evaluated using methods suited for probabilistic forecasts of binary target
+variables. Moreover, in the social sciences and experimental economics projects
+these forecasts can also be compared to forecasts from the prediction markets.
+The significance threshold $\alpha = 0.05$ for a two-sided $p\,$-value was used
+in all cases. Most of the evaluations were also conducted for smaller $\alpha$
+thresholds and are reported in the supplement.
+
+
+\paragraph{Expected number of statistically significant replication studies}
+By summing up all probabilities for significance under each method within one
+project, the expected number of statistically significant replication outcomes
+is obtained and can be compared to the observed number, \eg with a
+$\chi^2$-goodness-of-fit test (shown in Table \ref{table:expected-observed}).
+
+\begin{table}[!htb]
+\centering
+\caption{Observed and expected number of statistically significant replication
+  studies along with $p\,$-value from $\chi^2$-goodness-of-fit test. Forecasting
+  methods are abbreviated by N for \emph{naive}, S for \emph{shrinkage}, H for
+  \emph{heterogeneity}, SH for \emph{shrinkage and heterogeneity}, PM for
+  \emph{prediction market}.}
+\label{table:expected-observed}
+<< "table-expected-observed-significant", results = "asis" >>=
+# Helper functions to compute probability for significant replication in same direction
+# under gaussian predictive distribution
+prob_signif <- function(mu, sigma, sigma_r, alpha = 0.05) {
+  direction <- ifelse(mu >= 0, 1, -1)
+  p_significant <- pnorm(direction*qnorm(1 - alpha/2), mean = mu/sigma_r, sd = sigma/sigma_r, 
+                         lower.tail = ifelse(direction == 1, FALSE, TRUE))
+  return(p_significant)
+}
+
+get_prob_signif <- function(theta_o, sigma_o, sigma_r, tau = tau_default, alpha = 0.05) {
+  params <- get_params_all_methods(theta_o = theta_o, sigma_o = sigma_o, sigma_r = sigma_r, tau = tau)
+  p_significant <- lapply(params, function(method) {
+    prob_signif(mu = method$mu, sigma = method$sigma, sigma_r = sigma_r, alpha = alpha)
+    })
+  return(p_significant)
+}
+
+# Compute binary predictions under all forecasting methods and merge to one data set
+binary_pred_stat <- with(replication_data, 
+                         get_prob_signif(theta_o = FZ_OS, sigma_o = FZ_se_OS,
+                                         sigma_r = FZ_se_RS, alpha = 0.05)) %>% 
+  data.frame(replication_data) %>% 
+  gather(key = "Method", value = "p", levels_methods)
+
+binary_pred_df <- pm_data %>% 
+  mutate(p = Market_Belief,
+         Method = "PM") %>% 
+  rbind(binary_pred_stat) %>% 
+  mutate(Project = factor(Project, levels = levels_projects),
+         Method = factor(Method, levels = levels_methods_pm))
+
+# Table: compare expected versus observed number of significant replications
+exp_obs_table_df <- binary_pred_df %>% 
+  group_by(Project, Method) %>% 
+  summarise(N = n(),
+            Obs = sum(pval_RS < 0.05),
+            Exp = sum(p),
+            X = (Obs - Exp)^2/Exp + ((N - Obs) - (N - Exp))^2/(N - Exp),
+            pvalue = formatPval(pchisq(X, df = 1, lower.tail = FALSE))) %>% 
+  ungroup()
+
+exp_obs_table <- tabular(Project*Method ~ (Obs + Exp*Format(digits = 3) +
+                         pvalue*Justify(l, l))*Heading()*identity*DropEmpty(empty = "."),
+                         data = exp_obs_table_df)
+colLabels(exp_obs_table)[1,] <- c("Observed", "Expected", "$p\\,$-value") 
+rowLabels(exp_obs_table)[2,1] <- "$n = 18$"
+rowLabels(exp_obs_table)[7,1] <- "$n = 31$"
+rowLabels(exp_obs_table)[11,1] <- "$n = 73$"
+rowLabels(exp_obs_table)[15,1] <- "$n = 21$"
+toKable(exp_obs_table, booktabs = TRUE)
+@
+\end{table}
+
+In general, the observed number of significant replication studies is smaller
+than the expected number for all methods in all data sets, yet the amount of
+overestimation differs between the methods. The overestimation is the smallest
+for the SH method and the largest for the N method across all data sets.
+
+In the economics and philosophy projects there is no evidence of a difference
+between expected and observed under the S and SH method, whereas there is weak
+to moderate evidence of a difference for the N and H methods. In the social
+sciences and psychology projects, on the other hand, there is strong evidence
+for a difference between the expected and the observed number of significant
+replications for all methods, suggesting miscalibration of these forecasts.
+Furthermore, the expected numbers under the prediction market (PM) method in the
+economics and social sciences projects do not differ substantially from what was
+actually observed, providing no evidence for miscalibration of these forecasts.
+
+\paragraph{Brier scores}
+In Table \ref{table:mean-scores-binary} the mean (normalized) Brier scores are
+shown for each combination of data set and forecasting method. The mean
+normalized Brier score \citep{Schmid2005} is shown because it enables the
+comparison of models across data sets in which the proportion of significant
+replications differs (\eg in the psychology data set the proportion is much
+lower than in the others). It is computed by
+$\BS_{\text{n}} = (\BS_0 - \BS)/\BS_0$ where $\BS_0$ is the baseline Brier score
+assuming that all replication studies are given an estimated probability of
+significance equal to the proportion of significant replications. Hence,
+$\BS_{\text{n}}$ is positive if the predictive performance of the model is
+better than the baseline prediction.
+
+\begin{table}[!htb]
+\centering
+\caption{Mean Brier score (BS), mean normalized Brier score (BS norm), and
+  test-statistic with $p\,$-value from Spiegelhalter's $z$-test. Forecasting
+  methods are abbreviated by N for \emph{naive}, S for \emph{shrinkage}, H for
+  \emph{heterogeneity}, SH for \emph{shrinkage and heterogeneity}, PM for
+  \emph{prediction market}.}
+\label{table:mean-scores-binary}
+% ==========================================================================================
+<< "table-brierscore-miscalibration", results = "asis" >>=
+# Table: mean (normalized) Brier score and Spiegelhalter's z-statistic with p-value
+brier_table_df <- binary_pred_df %>% 
+  mutate(y = as.integer(pval_RS < 0.05),
+         brier = (y - p)^2) %>% 
+  group_by(Project, Method) %>% 
+  summarise(mean_brier0 = mean(y)*(1 - mean(y)),
+            mean_brier = mean(brier),
+            mean_brier_norm = (mean_brier0 - mean_brier)/mean_brier0,
+            z = sum((y - p)*(1 - 2*p))/sqrt(sum((1 - 2*p)^2*p*(1 - p))),
+            pvalue = formatPval(2*pnorm(q = abs(z), lower.tail = FALSE))) %>% 
+  ungroup() 
+
+brier_table <- tabular(Project * Method ~ ((mean_brier + mean_brier_norm)*Format(digit = 1) + 
+                       (z*Format(digit = 2)*Justify(r) + Justify(l)*pvalue))*Heading()*
+                       identity*DropEmpty(empty = "."), data = brier_table_df)
+colLabels(brier_table)[1,] <- c("BS", "BS norm", "$z$", "$p\\,$-value")
+rowLabels(brier_table)[2,1] <- "$n = 18$"
+rowLabels(brier_table)[7,1] <- "$n = 31$"
+rowLabels(brier_table)[11,1] <- "$n = 73$"
+rowLabels(brier_table)[15,1] <- "$n = 21$"
+toKable(brier_table, booktabs = TRUE)
+@
+\end{table}
+
+In the social sciences and psychology projects the predictive performance is
+poor for all statistical methods. Namely, all mean Brier scores are larger than
+$0.25$, a score that can be obtained by simply using 0.5 as estimated
+probability every time and additionally all mean normalized Brier scores are
+negative. In the economics project, the S and SH methods achieve a positive mean
+normalized Brier score, while it is negative for the N and H methods. Finally,
+the forecasts in the philosophy project show the best performance, \ie all
+methods except the N method achieve a positive mean normalized Brier score with
+the SH method showing the largest value. Moreover, the PM forecasts show a
+normalized Brier score of about zero in the economics projects, which is
+comparable to the statistical methods, whereas in the social sciences project,
+the performance is remarkably good, far better than all statistical forecasts in
+this project.
+
+Table \ref{table:mean-scores-binary} also displays the results of
+Spiegelhalter's $z$-test. In the psychology and social sciences data sets the
+test provides strong evidence for miscalibration of all statistical forecasts,
+but only weak evidence for miscalibration of the PM forecasts in the social
+sciences data set. In the economics data set, on the other hand, there is no
+evidence for miscalibration of the S, SH and the PM forecasts and weak evidence
+for miscalibration of the N and H forecasts. Finally, in the philosophy data set
+there is moderate evidence for miscalibration of the N and S forecasts, but no
+evidence for miscalibration of the H and SH forecasts.
+
+\paragraph{Calibration slope}
+Fig \ref{fig:auc-plot}A shows the calibration slopes obtained by logistic
+regression of the outcome whether the replication achieved statistical
+significance on the logit transformed estimated probabilities. In all but the
+psychology project the confidence intervals are very wide due to the small
+sample size. Also note that it was not possible to obtain the calibration slope
+for the PM method in the social science project because of complete separation.
+In the psychology and social sciences projects, the slopes of all methods are
+considerably below the nominal value of one suggesting miscalibration. However,
+the H and SH methods show higher values than the methods that do not take
+heterogeneity into account, indicating improvements in calibration. In the
+economics and philosophy projects, the slopes of all methods are closer to one
+and all confidence intervals include one, suggesting no miscalibration.
+
+\paragraph{Area under the curve}
+Fig \ref{fig:auc-plot}B shows the area under the curve (AUC) for each
+combination of data set and forecasting method. The 95\% Wald type confidence
+intervals were computed on the logit scale and then backtransformed.
+
+\begin{figure}[!htb]
+<< "plot-calibslope-auc", fig.height = 3, results = FALSE >>=
+# Obtain calibaration slope by logistic regression
+apply_grid <- expand.grid(project = levels_projects,
+                          method = levels_methods_pm)
+
+calib_slope_df <- apply(apply_grid, 1, function(par) {
+  tmp_data <- binary_pred_df[binary_pred_df$Project == par["project"] & 
+                               binary_pred_df$Method == par["method"],]
+  tmp_data$y <- as.integer(tmp_data$pval_RS < 0.05)
+  tmp_data$logit_p <- qlogis(tmp_data$p)
+  logist_fit <- try(glm(y ~ logit_p, family = "binomial", data = tmp_data))
+  if(inherits(logist_fit, "try-error")) {
+    NA_df <- data.frame("CI_lower" = NA, "Slope" = NA, "CI_upper" = NA, 
+                        "Method" = par["method"], "Project" = par["project"])
+    return(NA_df)
+  } else {
+    slope_ci <- confint.default(logist_fit)
+    data.frame("CI_lower" = slope_ci[2,1], "Slope" = unname(coef(logist_fit)[2]), 
+               "CI_upper" = slope_ci[2,2], "Method" = par["method"], "Project" = par["project"])
+  }
+}) %>% 
+  bind_rows() %>% 
+  mutate(Method = factor(Method, levels = rev(levels_methods_pm)),
+         Project = factor(Project, levels = rev(levels_projects), 
+                          labels = rev(labels_projects2lines)))
+
+calibslope_plot <- ggplot(data = filter(calib_slope_df, Slope < 100), 
+                          aes(x = Project, y = Slope, color = Method)) +
+  geom_hline(yintercept = 1, lty = 3, alpha = 0.8) +
+  geom_pointrange(aes(ymin = CI_lower, ymax = CI_upper), size = 0.5, fatten = 3,
+                  position = position_dodge2(width = 0.7)) + 
+  labs(y = "Calibration slope") + 
+  guides(color = guide_legend(reverse = TRUE)) +
+  scale_color_manual(name = "Method", values = colors_methods) +
+  coord_flip() +
+  theme_bw() 
+
+# Compute AUC 
+auc_df <- binary_pred_df %>% 
+  group_by(Project, Method) %>% 
+  mutate(y = as.integer(pval_RS < 0.05)) %>% 
+  summarise(CI_lower = confIntAUC(cases = p[y == 1], controls = p[y == 0])$lower[2],
+            AUC = confIntAUC(cases = p[y == 1], controls = p[y == 0])$AUC[2],
+            CI_upper = confIntAUC(cases = p[y == 1], controls = p[y == 0])$upper[2]) %>% 
+  ungroup() %>% 
+  mutate(Method = factor(Method, levels = rev(levels_methods_pm)),
+         # Perfect separation for PM in social sciences data set -> set CI-limits to AUC
+         CI_lower = ifelse(Method == "PM" & Project == "Social Sciences", AUC, CI_lower),
+         CI_upper = ifelse(Method == "PM" & Project == "Social Sciences", AUC, CI_upper),
+         Project = factor(Project, levels = rev(levels_projects),
+                          labels = rev(labels_projects2lines)))
+
+auc_plot <- ggplot(data = auc_df, aes(x = Project, y = AUC, color = Method)) +
+  geom_hline(yintercept = 0.5, lty = 3, alpha = 0.8) +
+  geom_pointrange(aes(ymin = CI_lower, ymax = CI_upper), size = 0.5,
+                  position = position_dodge2(width = 0.7), fatten = 3) +
+  coord_flip() +
+  guides(color = guide_legend(reverse = TRUE)) +
+  labs(x = NULL) +
+  scale_y_continuous(breaks = seq(0.25, 1, 0.25)) +
+  scale_color_manual(name = "Method", values = colors_methods) +
+  theme_bw()
+
+# Combine calibration slope and AUC into one plot
+ggarrange(calibslope_plot, auc_plot, ncol = 2, common.legend = TRUE, legend = "right", 
+          labels = list("(A)", "(B)"), font.label = list(face = "plain"))
+@
+\caption{Calibration slope and area under the curve (AUC) with 95\% confidence interval.
+Forecasting methods are abbreviated by 
+N for \emph{naive}, S for \emph{shrinkage}, H for \emph{heterogeneity}, 
+SH for \emph{shrinkage and heterogeneity}, PM for \emph{prediction market}.}
+\label{fig:auc-plot}
+\end{figure}
+
+Note that in the social sciences project for the PM forecasts, an AUC of one
+(without confidence interval) was obtained because the forecasts were able to
+completely separate non-significant and significant replications. The
+statistical forecasts in the social sciences project, on the other hand, show
+AUCs between 0.5 and 0.6 with wide confidence intervals, suggesting no
+discriminatory power. In the philosophy and psychology projects the H and SH
+methods show the highest AUCs. The former are around 0.8, while the latter are
+about 0.7, indicating reasonable discriminatory power of all forecasts. Finally,
+in the economics data set the N and S methods achieve the highest AUCs with
+values of around 0.75, but with very wide confidence intervals which all include
+0.5.
+
+
+\subsection{Sensitivity analysis of heterogeneity variance choice}
+\label{sec:sensitivity}
+For the H and SH methods the heterogeneity parameter $\tau$ was set to a value
+of 0.08 as described earlier. We performed a sensitivity analysis to investigate
+how much the results change when other values are selected. The change in
+predictive performance was investigated using the mean QS, mean LS, and mean
+CRPS, as they are good summary measures for calibration and sharpness of a
+predictive distribution. Furthermore, optimizing the mean score has been
+proposed as a general method for parameter estimation, which also includes
+maximum likelihood estimation (\ie optimum score estimation based on the LS)
+\citep[][Section 9]{Gneiting2007a}.
+
+Fig \ref{fig:optim-tau1} shows the the mean scores for each project as a
+function of the heterogeneity $\tau$.
+
+\begin{figure}[!htb]
+<< "plot-sensitivity-tau", fig.height = 5 >>=
+# Compute mean scores for different values of tau
+tau_seq <- seq(0, 0.4, 0.001)
+models <- list("H" = prediction_methods[["H"]],
+               "SH" = prediction_methods[["SH"]])
+apply_grid <- expand.grid(project = unique(replication_data$Project),
+                          score_type = names(gaussian_scores),
+                          model = names(models))
+
+sensitivity_results <- apply(apply_grid, 1, function(par) {
+  tmp_data <- replication_data[replication_data$Project == par["project"],]
+  score_function <- function(tau) {
+    params <- with(tmp_data, models[[par["model"]]](theta_o = FZ_OS, sigma_o = FZ_se_OS,
+                                                    sigma_r = FZ_se_RS, tau = tau))
+    scores <- gaussian_scores[[par["score_type"]]](mu = params$mu, sigma = params$sigma, 
+                                                   y = tmp_data$FZ_RS)
+    return(mean(scores))
+  }
+  optim_result <- optim(par = 0.001, fn = score_function, method = "L-BFGS-B", 
+                        lower = 0, upper = 10)
+  optim_df <- data.frame(tau_hat = optim_result$par, 
+                         mean_score = optim_result$value,
+                         Score_Type = par["score_type"],
+                         Method = par["model"],
+                         Project = par["project"])
+  scores_df <- data.frame(tau = tau_seq, 
+                          mean_score = sapply(tau_seq, score_function),
+                          Score_Type = par["score_type"],
+                          Method = par["model"],
+                          Project = par["project"])
+  return(list(scores = scores_df, optim = optim_df))
+})
+
+score_df <- do.call(rbind, lapply(sensitivity_results, function(list) list$scores)) %>% 
+  mutate(Method = factor(Method, levels = levels_methods),
+         Project = factor(Project, levels = levels_projects),
+         Score_Type = factor(Score_Type, levels = levels_scores))
+optim_df <- do.call(rbind, lapply(sensitivity_results, function(list) list$optim)) %>% 
+  mutate(Method = factor(Method, levels = levels_methods),
+         Project = factor(Project, levels = levels_projects),
+         Score_Type = factor(Score_Type, levels = levels_scores)) %>% 
+  group_by(Score_Type) %>% 
+  mutate(padding_score = sd(mean_score)*0.5) %>% 
+  ungroup()
+
+# Plot
+score_df %>% 
+  ggplot(aes(x = tau, y = mean_score, color = Method)) +
+  geom_vline(xintercept = tau_default, lty = 2, alpha = 0.8) +
+  geom_line(size = 0.8, alpha = 0.9) + 
+  geom_point(data = optim_df, size = 2, shape = 4, aes(x = tau_hat, y = mean_score, color = Method)) + 
+  geom_text(data = filter(optim_df, Method == "H"), show.legend = FALSE,
+            aes(x = tau_hat, y = mean_score + padding_score, label = round(tau_hat, 2))) +
+  geom_text(data = filter(optim_df, Method == "SH"), show.legend = FALSE,
+            aes(x = tau_hat, y = mean_score - padding_score, label = round(tau_hat, 2))) +
+  facet_grid(Score_Type ~ Project, scales = "free_y") +
+  labs(x = expression(tau), y = "Mean score") + 
+  scale_color_manual(name = "Method", values = colors_methods) + 
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+# Cross validation
+# set.seed(42)
+# folds <- 5
+# cv_fold <- sample(x = seq(1, 5), size = nrow(replication_data), replace = TRUE)
+# lapply(X = seq(1, 5), function(i) {
+#   test_data <- replication_data[cv_fold == i,]
+#   train_data <- replication_data[cv_fold != i,]
+# })
+@
+\caption{Mean scores as a function of $\tau$ for each score type and project. The dashed line indicates the chosen value of 0.08. Minima are indicated by a cross.
+Forecasting methods are abbreviated by
+H for \emph{heterogeneity} and SH for \emph{shrinkage and heterogeneity}.}
+\label{fig:optim-tau1}
+\end{figure}
+
+In general, many of the mean score functions are rather flat, suggesting large
+uncertainty about the $\tau$ parameter. However, the chosen value of 0.08 seems
+plausible for the economics and philosophy projects, as it is close to the
+minima of all mean score functions. The values of $\tau$, which minimize the
+mean score functions in the social sciences and psychology projects, on the
+other hand, are substantially larger than 0.08. The SH model shows smaller mean
+scores than the H model over the entire range of $\tau$ in all but the
+philosophy data set, where both models show comparable mean scores. This
+suggests that evidence-based shrinkage leads to a better (or at least equal)
+predictive performance across all data sets and that the comparison of the
+methods is not severely influenced by the choice of $\tau$.
+
+\section{Discussion} 
+\label{sec:discussion}
+This paper addressed the question to what extent it is possible to predict the
+effect estimate of a replication study using the effect estimate from the
+original study and knowledge of the sample size in both studies. In all models
+we assumed that after a suitable transformation an effect can be modelled by a
+normally distributed random variable. Furthermore, we either assumed that in the
+original study the effect was estimated in an unbiased way (\emph{naive model}),
+or we shrunk the effect towards zero based on the evidence in the original study
+(\emph{shrinkage model}). In a Bayesian framework, the former arises when
+choosing a flat prior distribution for the effect, while the latter arises by
+choosing a zero-mean normal prior and estimating the prior variance by empirical
+Bayes. Finally, the models also differed in terms of whether between-study
+heterogeneity of the effects was taken into account or not, which was
+incorporated by a hierarchical model structure of the effect sizes.
+
+
+Replication has been investigated from a predictive point of view before;
+\citet{Bayarri2002} used a similar hierarchical model but chose a full Bayesian
+approach with priors put also on the variance parameters. For the overall
+effect, on the other hand, they chose a flat prior, which leads to a predictive
+distributions without shrinkage towards zero. \citet{Patil2016} used a simpler
+model which was derived in a non-Bayesian framework, but corresponds to our
+naive model. This model was then used to obtain forecasts of replication effect
+estimates using the data set from the \emph{Reproducibility Project: Psychology}
+\citep{Opensc2015} and also in the analyses of the \emph{Experimental Economics
+Replication Project} \citep{Camerer2016} and the \emph{Social Sciences
+Replication Project} \citep{Camerer2018}. In all of these analyses, however,
+apart from examining the coverage of the prediction intervals, no systematic
+evaluation of the predictive distributions was conducted, even though there
+exist many well established methods for evaluating probabilistic forecasts. For
+this reason, we computed and evaluated the predictive distributions under the
+four different models for the three aforementioned data sets and additionally
+for the data from the \emph{Experimental Philosophy Replicability Project}
+\citep{Cova2018}.
+
+\paragraph{Predictive evaluation}
+By taking into account between-study heterogeneity, evidence-based shrinkage, or
+both, calibration and sharpness have improved compared to the naive method.
+Forecasts obtained with the shrinkage and heterogeneity method usually showed a
+higher coverage of the prediction intervals, more uniformly distributed PIT
+values, substantially lower mean scores, and less or no evidence of
+miscalibration. The improvements have been larger in the social sciences and
+psychology and smaller in the economics and philosophy projects. However, in the
+psychology and social sciences projects, the tests still suggest some
+miscalibration, even for the heterogeneity and shrinkage model which performed
+the best, while there is less evidence for miscalibration in the philosophy and
+economics projects.
+
+% prediction markets
+Furthermore, in the social sciences and economics data sets, the forecasts could
+be compared to forecasts from the non-statistical prediction market method which
+provides an estimate of the peer-beliefs about the probability of significance.
+In the economics data set, the shrinkage methods showed equal performance
+compared to the prediction market, while in the social sciences data set, the
+prediction market method performed better than any of the statistical methods.
+
+% interpretation
+It seems likely that in many of the investigated fields there is between-study
+heterogeneity present, as the models that take heterogeneity into account always
+performed the same or better than their counterparts which do not take
+heterogeneity into account. This is not surprising, as many of the replications
+used for example samples from different populations or different materials than
+those in the original studies \citep{Gilbert2016}. Evidence-based shrinkage also
+improved predictive performance considerably in most cases, indicating that
+shrinkage is necessary to counteract regression to the mean. Moreover, this
+could suggest that the effect estimates from the original studies were to some
+degree inflated or even false positives, \eg because of publication bias or the
+use of questionable research practices.
+
+\paragraph{Differences between replication projects}
+The predictive performance differed between the replication projects. There are
+several possible explanations for this phenomenon. The number of studies within
+a replication project could be one possible reason for the differences in the
+results of some of the evaluation methods, \eg calibration tests. That is, the
+psychology project consists of many more study pairs, which leads to higher
+power to detect miscalibration in this project compared to the other projects.
+ 
+% selection bias
+Another explanation might be that differences in the study selection process of
+the replication projects lead to the observed differences. For instance, the
+original studies in the social sciences project were selected from the journals
+\emph{Nature} and \emph{Science}, which are known to mainly promote novel and
+exciting research, while in the philosophy, economics, and psychology projects
+they were selected from standard journals. Furthermore, if an original study
+contained several experiments, the rules to select the experiment to be
+replicated differed between the projects. In the psychology project, by default
+the last experiment was selected, whereas in the social sciences and philosophy
+projects by default the first experiment was selected. In the economics project,
+however, ``the most central result'' according to the judgement of the
+replicators was selected by default. If on average researchers report more
+robust findings at the first position and more exploratory findings at the last
+position of a publication (or the other way around), this might have
+systematically influenced the outcome of the replication studies. Similarly,
+when replicators can decide for themselves which experiment they want to
+replicate, they might systematically choose experiments with more robust effects
+that are easier to replicate.
+
+% publication bias, qrp's
+It may also be the case that the degree of inflation of original effect
+estimates varies between the different fields and that this leads to the
+observed differences. In particular, in the economics, social sciences, and
+psychology projects, the predictive performance was more substantially improved
+through evidence-based shrinkage than in the philosophy project, although the
+amount of shrinkage was roughly the same in all projects (see
+the supplement for details). One possible explanation might be that
+experimental philosophy is less susceptible to publication bias, as it is a much
+younger field where there is high acceptance for negative or null results
+\citep{Cova2018}. However, it may also be that in the early days of a field more
+obvious and more robust effects are investigated, which could explain the higher
+replicability of experimental philosophy findings.
+
+
+\paragraph{Conclusions}
+% main findings
+The attempt to forecast the results of replication studies brought new insights.
+Using a model of effect sizes which can take into account inflation of original
+study effect estimates and between-study heterogeneity, it was possible to
+predict the effect estimate of the replication study with good predictive
+performance in two of the four data sets. In the other two data sets, predictive
+performance could still be drastically improved compared to the previously used
+naive model \citep{Patil2016}, which assumes that the effect estimates of the
+original study are not inflated and that there is no between-study
+heterogeneity.
+
+% implications
+These results have various implications: First, state-of-the-art methods for
+assessing discrimination, calibration, and sharpness should be used to evaluate
+probabilistic forecasts of replication outcomes. This allows to make more
+precise statements about the quality of the forecasts compared to the ad-hoc
+methods which were used so far \citep{Dreber2015, Patil2016, Camerer2016,
+Camerer2018, Forsell2019}. Second, researchers should be aware of the fact that
+original and replication effect estimates may show some degree of heterogeneity,
+although the study designs are as closely matched as possible. Finally, for the
+design of a new replication study, the developed model can also be used to
+determine the sample size required to obtain a significant replication result
+for a specified power. Our method provides a more principled approach compared
+to just shrinking the target effect size ad hoc by an arbitrary amount as was
+done in the planning of previous replication studies. Software for doing this as
+well as the four data sets are available in the \textsf{R} package
+\texttt{ReplicationSuccess}
+(\url{https://cran.r-project.org/package=ReplicationSuccess}).
+
+However, in the analysis of replication studies it may not be a good idea to
+reduce replication success solely to whether or not a replication study achieves
+statistical significance. One reason for this is that replication studies are
+often not sufficiently powered \citep{Anderson2017}, so from a predictive point
+of view it is then not unlikely that non-significance will occur, even if the
+underlying effect is not zero. Another problem is that significance alone does
+not take into account effect size, \ie significance can still be achieved by
+increasing the sample size of the replication study, even if there is
+substantial shrinkage of the replication estimate. We recommend instead to adopt
+more quantitative and probabilistic reasoning to assess replication success.
+Methods such as replication Bayes factors \citep{Ly2018} or the sceptical
+$p\,$-value \citep{Held2020} are promising approaches to replace statistical
+significance as the main criterion for replication success.
+
+% differences fields
+Our results also offer interesting insights about the predictability of
+replication outcomes in four different fields. However, they should not be
+interpreted to mean that research from one field is more credible than research
+from another. There are many other factors which could explain the observed
+differences in predictive performance (see the discussion in the section
+``Differences between replication projects''). The complexity underlying any
+replication project is enormous, we should applaud all the researchers involved
+for investing their limited resources into these endeavours. There is an urgent
+need to develop new methods for the design and analysis of replication studies;
+these data sets will be particularly useful for these purposes.
+
+% limitations and extensions
+The approach used in this paper also has some limitations: In all models, the
+simplifying assumption of normally distributed likelihood and prior has been
+made, which can be questionable for smaller sample sizes. Moreover, a pragmatic
+Bayesian approach was chosen, \ie no prior was put on the heterogeneity variance
+$\tau^2$ and the variance hyperparameter of $\theta$ was specified with
+empirical Bayes. We recognize that a full Bayesian treatment, such as in
+\citet{Bayarri2002}, could reflect the uncertainty more accurately. However, our
+strategy leads to analytical tractability of the predictive distribution. This
+facilitates interpretability and allows to easily study limiting cases, which
+would be harder for a full Bayes approach where numerical or stochastic
+approximation methods are required. Moreover, it is well known that shrinkage is
+necessary for the prediction of new observations. The empirical Bayes shrinkage
+factor has proven to be optimal in very general settings \citep{Copas1983,
+  Copas1997} and is for example also employed in clinical prediction models
+\citep[][Chapter 13.2]{Steyerberg2009}. Furthermore, the data sets used all come
+from relatively similar fields of academic science. It would also be of interest
+to perform the same analysis on data from the life sciences, as well as for
+non-academic research. Finally, only data from replication projects with
+``one-to-one'' design were considered. It would also be interesting to conduct
+similar analyses for data from replication projects which use ``many-to-one''
+replication designs, such as the ``Many Labs'' project \citep{Klein2014,
+  Ebersole2016, Klein2018}, especially for the assessment of heterogeneity.
+
+
+\section*{Acknowledgments}
+We thank Kelly Reeve for helpful comments on the draft of the manuscript.
+
+\bibliographystyle{apalikedoiurl}
+\bibliography{bibliography}
+
+<< "sessionInfo1", eval = Reproducibility, results = "asis" >>=
+## print R sessionInfo to see system information and package versions
+## used to compile the manuscript (set Reproducibility = FALSE, to not do that)
+cat("\\newpage \\section*{Computational details}")
+@
+<< "sessionInfo2", echo = Reproducibility, results = Reproducibility >>=
+cat(paste(Sys.time(), Sys.timezone(), "\n"))
+sessionInfo()
+@
+
+\end{document}

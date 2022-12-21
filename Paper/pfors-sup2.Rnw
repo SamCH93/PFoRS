@@ -1,0 +1,923 @@
+\documentclass[a4paper, 11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{natbib} % citations
+\usepackage{amsmath} % math
+\input{newCommands.tex} % commands by leo for nicer formatting
+\usepackage{booktabs} % nicer tables
+\usepackage{pdflscape} % allow landscape mode for pdfs
+\usepackage{doi}
+
+% margins %
+\usepackage{geometry}
+ \geometry{
+ a4paper,
+ total={170mm,257mm},
+ left=25mm,
+ right=25mm,
+ top=30mm,
+ bottom=25mm,
+}
+
+\usepackage{hyperref}
+\hypersetup{
+  bookmarksopen=true,
+  breaklinks=true,
+  colorlinks=true,
+  linkcolor=black,
+  anchorcolor=black,
+  citecolor=blue,
+  urlcolor=black,
+}
+
+% title, authors, date
+\title{Probabilistic forecasting of replication studies \\ 
+Supplement B: Supplementary results}
+\author{Samuel Pawel, Leonhard Held}
+\date{\today}
+
+\begin{document}
+
+% knitr options
+% ===============================================================================
+<< "main-setup", include = FALSE >>=
+library(knitr)
+opts_chunk$set(fig.height = 4,
+               fig.align = "center",
+               echo = FALSE,
+               warning = FALSE,
+               message = FALSE,
+               # size = "scriptsize"
+               child.command = "include",
+               cache = FALSE)
+
+## should sessionInfo be printed at the end?
+Reproducibility <- TRUE
+@
+
+% Data and libraries 
+% ===============================================================================
+<< "data-libraries-setup" >>=
+# Packages
+library("readr")
+library("dplyr")
+library("tidyr")
+library("ggplot2")
+library("ggbeeswarm")
+library("ggpubr") 
+library("tables")
+library("biostatUZH")
+# can be installed with: install.packages("biostatUZH", repos = "http://R-Forge.R-project.org")
+
+# Load meta-analytic subset data (i.e. SE of Fisher z-transformed correlation can be computed)
+replication_data <- read_csv("../../Data/replications_ma_subset.csv")
+
+# Prediction market data
+pm_data <- replication_data %>% 
+  filter(!is.na(Market_Belief))
+
+# Levels and labels of factors
+levels_projects <- c("Experimental Economics", 
+                     "Experimental Philosophy", 
+                     "Psychology",
+                     "Social Sciences")
+labels_projects2lines <- c("Experimental \nEconomics", 
+                           "Experimental \nPhilosophy", 
+                           "Psychology", 
+                           "Social \nSciences")
+levels_methods <- c("N", 
+                    "S", 
+                    "H", 
+                    "SH")
+levels_methods_pm <- c(levels_methods, "PM")
+levels_scores <- c("QS",
+                   "LS", 
+                   "CRPS")
+
+# Colors
+colors_methods <- c("N" = "#F8766D",
+                    "H" = "#7CAE00",
+                    "S" = "#00BFC4",
+                    "SH" = "#C77CFF",
+                    "PM" = "#104E8B")
+@
+% Helper functions 
+<< "helper-predictive-distribution" >>=
+# Default value for tau hyperparameter (see article for how this was determined)
+tau_default <- 0.08 
+
+# Functions to obtain parameters of predictive distributions
+get_params <- function(theta_o, sigma_o, sigma_r, tau = tau_default, prior = "flat") {
+  t_o <- theta_o/sigma_o
+  d <- tau^2/sigma_o^2
+  if (prior == "sceptical") s <- pmax(1 - (1 + d)/t_o^2, 0)
+  if (prior == "flat") s <- 1
+  mu <- s*theta_o
+  sigma <- sqrt(s*(sigma_o^2 + tau^2) + sigma_r^2 + tau^2)
+  return(data.frame("mu" = mu, "sigma" = sigma))
+}
+
+prediction_methods <- list(
+  "N" = function(theta_o, sigma_o, sigma_r, tau) {
+    get_params(theta_o, sigma_o, sigma_r, tau = 0, prior = "flat")
+    },
+  "S" = function(theta_o, sigma_o, sigma_r, tau) {
+    get_params(theta_o, sigma_o, sigma_r, tau = 0, prior = "sceptical")
+    },
+  "H" = function(theta_o, sigma_o, sigma_r, tau) {
+    get_params(theta_o, sigma_o, sigma_r, tau = tau, prior = "flat")
+    },
+  "SH" = function(theta_o, sigma_o, sigma_r, tau) {
+    get_params(theta_o, sigma_o, sigma_r, tau = tau, prior = "sceptical")
+    }
+  )
+
+get_params_all_methods <- function(theta_o, sigma_o, sigma_r, tau = tau_default, 
+                                   methods = prediction_methods) {
+  params <- lapply(methods, function(f) f(theta_o = theta_o, sigma_o = sigma_o, 
+                                          sigma_r = sigma_r, tau = tau))
+  return(params)
+}
+
+# Proper scoring rules
+# ----------------------------------------------------------------------------------
+# Helper functions for proper scoring rules for gaussian predictive distribution
+QS <- function(mu, sigma, y) -2/sigma*dnorm(x = (y - mu)/sigma) + 1/(2*sqrt(pi)*sigma)
+
+LS <- function(mu, sigma, y) (y - mu)^2/(2*sigma^2) + log(sigma) + 0.5*log(2*pi)
+
+CRPS <- function(mu, sigma, y) {
+  sigma*((y - mu)/sigma*(2*pnorm(q = (y - mu)/sigma) - 1) + 2*dnorm(x = (y - mu)/sigma) - 1/sqrt(pi))
+}
+
+gaussian_scores <- list("QS" = QS, 
+                        "LS" = LS, 
+                        "CRPS" = CRPS)
+
+get_scores <- function(theta_o, theta_r, sigma_o, sigma_r, tau = tau_default, 
+                       scoring_rules = gaussian_scores) {
+  params <- get_params_all_methods(theta_o = theta_o, sigma_o = sigma_o, 
+                                   sigma_r = sigma_r, tau = tau)
+  scores <- lapply(seq_along(scoring_rules), function(i) {
+    score_i <- lapply(params, function(method) {
+      scoring_rules[[i]](mu = method$mu, sigma = method$sigma, y = theta_r)
+    })
+    data.frame(score_i, "Type" = names(scoring_rules)[i])
+  })
+  scores_df <- do.call(rbind, scores)
+  return(scores_df)
+}
+@
+\maketitle
+
+\section{Sample size computations taking into account shrinkage and heterogeneity}
+\begin{figure}[!h]
+<< "plot-sample-size", fig.height = 4, results = FALSE >>=
+# Function to compute predictive density/cdf 
+predict_t_r <- function(x, t_o, c, d, shrinkage = FALSE) {
+  if (shrinkage == TRUE) s <- pmax(1 - (1 + d)/t_o^2, 0)
+  else s <- 1
+  mu <- s*t_o*sqrt(c)
+  sigma <- sqrt(s*(c + d*c) + 1 + d*c)
+  return(pnorm(q = x, mean = mu, sd = sigma, lower.tail = FALSE))
+}
+
+# Helper function to compute required relative sample size c
+sampleSizeReplication <- function(t_o, d = 0, power = 0.8, level = 0.05,
+                                  alternative = "two.sided", prior = "flat") {
+  
+  # specify direction and critical value
+  direction <- ifelse(t_o >= 0, 1, -1)
+  alt <- ifelse(alternative == "two.sided", 2, 1)
+  critical_value <- direction*qnorm(1 - level/alt)
+  
+  # define power function depending on prior
+  if (prior == "flat") s <- 1
+  if (prior == "sceptical") s <- pmax(1 - (1 + d)/t_o^2, 0)
+  powerFun <- function(c) {
+    power <- pnorm(q = critical_value, 
+                   mean = s*t_o*sqrt(c), 
+                   sd = sqrt(s*(c + d*c) + 1 + d*c),
+                   lower.tail = ifelse(direction == 1, FALSE, TRUE))
+    return(power)
+  }
+  
+  # find required relative sample size (upper limit c = 100)
+  c <- try(uniroot(f = function(c) powerFun(c) - power, lower = 0, upper = 100)$root)
+  if (class(c) == "try-error") return(NA) 
+  return(c)
+}
+
+apply_grid <- expand.grid(t_o = seq(0, 4.5, 0.01),
+                          d = seq(0, 2, 0.4),
+                          prior = c("flat", "sceptical"))
+samplesize_df <- apply(apply_grid, 1, function(par) {
+  c <- sampleSizeReplication(t_o = as.double(par[1]), d = as.double(par[2]), prior = par[3])
+  result <- data.frame(c, t_o = as.double(par[1]), d = as.double(par[2]), Prior = par[3])
+  return(result)
+}) %>% 
+  bind_rows() %>% 
+  mutate(Prior = case_when(Prior == "flat" ~ "Heterogeneity",
+                           Prior == "sceptical" ~ "Shrinkage + Heterogeneity"))
+
+## Plot of c needed to achieve 80% power
+z_to_p <- function(z) 2*pnorm(z, lower.tail = FALSE)
+pval_labels <- formatPval(z_to_p(z = seq(0, 4, 1)))
+ggplot(data = samplesize_df, aes(x = t_o, y = c, color = d)) +
+  geom_hline(yintercept = 1, lty = 2) +
+  geom_line(aes(group = factor(d)), size = 0.8) + 
+  facet_wrap(~ Prior, ncol = 1) + 
+  labs(x = bquote(italic(t)[o]), y = bquote(italic(c))) +
+  guides(color = guide_colorbar(title = bquote(italic(~~d)))) +
+  scale_color_viridis_c() + 
+  scale_y_log10(breaks = c(0.5, 1, 2, 10, 100)) +
+  scale_x_continuous(sec.axis = sec_axis(trans = ~z_to_p(.),
+                                         breaks = z_to_p(seq(0, 4, 1)), 
+                                         labels = pval_labels,
+                                         name = expression(italic(p)[o])),
+                     breaks = seq(0, 5, 1))  +
+  theme_bw()
+@
+\caption{Required relative sample size $c = n_r/n_o$ to achieve a power of 80\% as a function of the test statistic $t_o$ (bottom axis) respectively the two-sided $p\,$-value $p_o$ (top axis) of the original study and the relative between study heterogeneity $d = \tau^2/\sigma^2_o$.}
+\label{fig:sample-size}
+\end{figure}
+
+Assuming that the standard errors of the effect estimates only depend on some
+unit variance $\kappa^2$ and the sample size of the study, \ie
+$\sigma^2_o = \kappa^2/n_o$ and $\sigma^2_r = \kappa^2/n_r$, the required
+relative sample size $c = n_r/n_o$ to achieve a statistically significant result
+in the replication study with a certain power can be computed using root-finding
+algorithms. In Figure \ref{fig:sample-size}, the required $c$ to achieve 80\%
+power under the different models is shown as a function of $t_o$ and the
+relative between study heterogeneity $d$. As can be seen, the required relative
+sample size $c$ decreases for increasing $t_o$, \ie evidence for an effect, and
+decreasing relative between study heterogeneity $d$. Furthermore, for small
+$t_o$, increasing $d$ increases the required $c$ much stronger than for large
+$t_o$. Comparing the shrinkage to the naive model, the required $c$ under the
+shrinkage model is much larger for the same $t_o$, especially for small $t_o$.
+These results illustrate the fact that to achieve a reasonable power, the sample
+size of the replication study needs to be massively increased compared to the
+original study, when the results were only suggestive and/or subject to
+heterogeneity.
+
+<< eval = FALSE >>=
+quantile_difference <- function(tau, lower = 0.025, upper = 0.975) {
+  # for given heterogeneity tau, returns difference of quantiles upper - lower
+  # after transformation with tanh
+  l <- qnorm(lower)
+  u <- qnorm(upper)
+  corr_diff <- tanh(tau*u) - tanh(tau*l)
+  return(corr_diff)
+}
+find_tau_difference <- function(diff, lower = 0.025, upper = 0.975) {
+  root_fun <- function(t) quantile_difference(tau = t, lower = lower, upper = upper) - diff
+  tau <- uniroot(f = root_fun, lower = 0, upper = 100)$root
+  return(tau)
+}
+r_classification <- data.frame(size = c("small", "medium", "large"),
+                               r = c(0.1, 0.3, 0.5))
+r_classification$tau <- sapply(r_classification$r, function(r) find_tau_difference(diff = r))
+
+tau_df <- read.csv("../../Data/tau_data_psychology.csv")
+tau_df %>%
+  filter(Type.of.ES %in% c("Weighted Pearson's r",
+                           "Corrected Pearson's r",
+                           "Pearson's r",
+                           "Weighted corrected Pearson's r")) %>%
+  filter(tau != 0) %>%
+  ggplot(aes(x = tau)) +
+  geom_histogram(breaks = seq(0, 0.6, 0.06), col = 1, fill = "darkgrey") +
+  geom_vline(xintercept = r_classification$tau, size = 1, lty = 2) +
+  annotate(geom = "text", x = r_classification$tau, y = 0, label = r_classification$size) + 
+  labs(x = expression(hat(tau))) +
+  theme_bw()
+@
+
+
+\section{Shrinkage across methods and projects}
+Figure \ref{fig:shrinkage} shows the shrinkage factors for the S forecasts (shrinkage method with $\tau
+= 0$) and for the SH forecasts (shrinkage method with $\tau = 0.08$).
+
+\begin{figure}
+<< "plot-shrinkage-projects" >>=
+# Determine shrinkage factor s under S and SH model
+shrinkage_factor <- function(t_o, d) pmax(1 - (1 + d)/t_o^2, 0)
+shrinkage_df <- replication_data %>% 
+  mutate(S = shrinkage_factor(t_o = FZ_OS/FZ_se_OS, d = 0),
+         SH = shrinkage_factor(t_o = FZ_OS/FZ_se_OS, d = 0.08^2/FZ_se_OS^2),
+         Project = factor(Project, levels = levels_projects,
+                          labels = labels_projects2lines)) %>% 
+  gather(key = "Method", value = "s", S, SH)
+
+ggplot(data = shrinkage_df, aes(x = Project, y = s)) +
+  geom_boxplot(alpha = 0.5, fill = "lightgrey") +
+  geom_quasirandom(size = 1.5, shape = 21, alpha = 0.7, fill = "grey20") +
+  facet_wrap(~ Method) +
+  labs(y = expression(italic(s))) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90))
+@
+\caption{Obtained shrinkage factors $s$ under S and SH method across replication
+  projects.}
+\label{fig:shrinkage}
+\end{figure}
+
+As expected, shrinkage under the SH method is larger than under the S method.
+However, there appears to be no large difference between the four projects with
+respect to the distribution of the shrinkage factors. The median shrinkage
+factor is about 0.8.
+
+\section{Forecasts of effect estimates}
+
+\subsection{Testing for deviation from uniformity of PITs}
+Table \ref{table:ks-test-pits} shows the results of Kolmogorov-Smirnov tests
+applied to the PIT values to test for miscalibration. In each data set, the test
+statistic of the SH method shows the smallest value, suggesting that there is
+the least evidence for this method to be miscalibrated. Looking at the economics
+data set, the tests provide weak evidence for miscalibration of the S and SH
+methods and moderate evidence for miscalibration of the N and H methods. In the
+philosophy data set, on the other hand, there is no evidence for miscalibration
+of any of the methods. Finally, in the social sciences and psychology data sets,
+the tests provide substantial evidence for miscalibration of all methods.
+
+\begin{table}[!htb]
+\centering
+\caption{Kolmogorov-Smirnov tests comparing PIT values to $U(0,1)$ distribution.}
+\label{table:ks-test-pits}
+<< "table-ks", results = "asis" >>=
+# Helper function to compute PIT
+get_PITs <- function(theta_o, theta_r, sigma_o, sigma_r, tau = tau_default) {
+  params <- get_params_all_methods(theta_o = theta_o, sigma_o = sigma_o, 
+                                   sigma_r = sigma_r, tau = tau)
+  PITs <- lapply(seq_along(params), function(i) {
+    data.frame("PIT" = pnorm(q = theta_r, mean = params[[i]]$mu, sd = params[[i]]$sigma),
+               "Method" = names(params)[i])
+    })
+  PITs_df <- do.call(rbind, PITs)
+  return(PITs_df)
+}
+
+# Compute PITs
+PITs <- with(replication_data, get_PITs(theta_o = FZ_OS, theta_r = FZ_RS, 
+                                        sigma_o = FZ_se_OS, sigma_r = FZ_se_RS))
+PIT_data <- cbind(replication_data, PITs)
+
+# KS test
+PIT_ks <- PIT_data %>% 
+  group_by(Project, Method) %>% 
+  summarise(t = ks.test(PIT, y = "punif", 0, 1, exact = TRUE)$statistic,
+            pvalue = ks.test(PIT, y = "punif", 0, 1, exact = TRUE)$p.value,
+            Test = "KS") %>% 
+  ungroup()
+PIT_ks_table <- PIT_ks %>% 
+  mutate(Project = factor(Project, levels = levels_projects))
+
+pit_ks_table <- tabular(Project * Method ~ (t*Format(digits = 1) + formatPval(pvalue)*
+                        Justify(l,l))*Heading()*identity, data = PIT_ks_table)
+colLabels(pit_ks_table)[1,] <- c("Test statistic", "$p\\,$-value")
+rowLabels(pit_ks_table)[2,1] <- "$n = 18$"
+rowLabels(pit_ks_table)[6,1] <- "$n = 31$"
+rowLabels(pit_ks_table)[10,1] <- "$n = 73$"
+rowLabels(pit_ks_table)[14,1] <- "$n = 21$"
+toKable(pit_ks_table, booktabs = TRUE)
+@
+\end{table}
+
+\subsection{Scoring rules}
+Figure \ref{fig:mean-scores} shows the mean of the logarithmic scores (LS), continuous ranked probability scores (CRPS), and quadratic scores (QS) as well as their standard error for each data set and prediction method. 
+It should be noted, that the standard errors are presented only to illustrate the spread of the individual scores and not to compare the mean scores between the different methods (this will be done further below using a paired test). 
+\begin{figure}[!htb]
+<< "plot-scores" >>=
+# Compute mean scores
+scores <- with(replication_data, get_scores(theta_o = FZ_OS, theta_r = FZ_RS, 
+                                            sigma_o = FZ_se_OS, sigma_r = FZ_se_RS))
+mean_score_data <- data.frame(scores, replication_data) %>% 
+  gather(key = "Method", value = "Score", levels_methods) %>% 
+  group_by(Project, Method, Type) %>%
+  summarise(mean_Score = mean(Score),
+            SE_mean_Score = sd(Score)/sqrt(n())) %>% 
+  ungroup()
+
+# Plot of mean scores with standard errors
+mean_score_data_plot <- mean_score_data %>% 
+  # same order as in tables
+  mutate(Method = factor(Method, levels = rev(levels_methods)),
+         Project = factor(Project, levels = rev(levels_projects),
+                          labels = rev(labels_projects2lines)))
+
+ggplot(data = mean_score_data_plot, aes(x = Project, y = mean_Score, color = Method)) +
+  geom_pointrange(aes(ymin = mean_Score - SE_mean_Score, y = mean_Score, ymax = mean_Score + SE_mean_Score),
+                  position = position_dodge2(width = 0.5), fatten = 3) + 
+  facet_grid(~ Type, scales = "free") +
+  coord_flip() +
+  guides(color = guide_legend(reverse = TRUE)) +
+  labs(y = expression(paste("Mean score (", ''%+-%'', " se)"))) + 
+  scale_color_manual(name = "Method", values = colors_methods) + 
+  theme_bw() +
+  theme(legend.position = "bottom")
+@
+\caption{Mean scores with standard errors.}
+\label{fig:mean-scores}
+\end{figure}
+
+Table \ref{table:method-tests-scores-continuous} shows the $p\,$-values of the paired Wilcoxon rank sum tests of the scores of the SH method compared to the scores of the other three prediction methods.
+Only these comparisons are reported since the SH method achieved the lowest mean score in all score types and data sets.
+\begin{table}[!htb]
+\centering
+\caption{Results of paired Wilcoxon rank sum tests of the SH method vs. the other three methods.}
+\label{table:method-tests-scores-continuous}
+<< "table-scores-paired-test", results = "asis" >>=
+# Conduct paired tests whether scores different between methods
+scores_df <- data.frame(scores, replication_data) %>% 
+  gather(key = "Method", value = "Score", levels_methods)
+apply_grid <- expand.grid(project = unique(scores_df$Project),
+                          score_type = names(gaussian_scores))
+
+paired_tests <- apply(apply_grid, 1, function(par) {
+  tmp_data <- scores_df[scores_df$Project == par["project"] & scores_df$Type == par["score_type"],]
+  test <- pairwise.wilcox.test(x = tmp_data$Score, g = tmp_data$Method,
+                               paired = TRUE, p.adjust.method = "none")$p.value
+  results <- data.frame("Test" = levels_methods[c(3, 1, 2)],
+                        "pvalue" = test[3,],
+                        "Project" = par["project"],
+                        "Type" = par["score_type"])
+}) %>% 
+  bind_rows() %>% 
+  mutate(Test = factor(Test, levels = levels_methods[1:3]),
+         Project = factor(Project, levels = levels_projects),
+         Type = factor(Type, levels_scores),
+         pvalue = formatPval(pvalue))
+
+
+paired_test_table <- tabular(Project*Test ~ (Type * pvalue*Justify(c,l))*
+                             Heading()*identity, data = paired_tests)
+colLabels(paired_test_table)[3,] <- "$p\\,$-value"
+rowLabels(paired_test_table)[2,1] <- "$n = 18$"
+rowLabels(paired_test_table)[5,1] <- "$n = 31$"
+rowLabels(paired_test_table)[8,1] <- "$n = 73$"
+rowLabels(paired_test_table)[11,1] <- "$n = 21$"
+toKable(paired_test_table, booktabs = TRUE)
+@
+\end{table}
+For the forecasts in the psychology and social sciences data sets, there is in most cases strong evidence of a difference in scores between the SH method and the other methods.
+In the philosophy data set, on the other hand, there is no evidence for a difference between the scores of the SH method and the other methods.  
+Finally, in the economics data set there is moderate evidence for a difference of the scores between the SH method and the N and H methods, however, no evidence for a difference of the scores between the SH and S methods.
+
+In Table \ref{table:contin-miscalibration-test}, the results of the scoring rule based calibration tests are shown. 
+The results of the four tests are often but not always in agreement.
+First, the unconditional test based on the logarithmic score suggests that all methods in the psychology and social sciences data sets are miscalibrated. 
+The test also provides some evidence for miscalibration of the N and S methods in the economics and philosophy data sets.
+Second, the results from the unconditional test based on the CRPS provide evidence for miscalibration of all methods in the social sciences and psychology data sets, moderate evidence for miscalibration of the N method in the economics data set, and weak evidence for miscalibration of the N and S methods in the case of the philosophy data set.
+Third, the DSS regression test indicates miscalibration of all methods in the psychology data set and it provides weak evidence for miscalibration of the N method in the social sciences data set. 
+Furthermore, the test does not suggest miscalibration of any method in the economics and philosophy data sets.
+Finally, the results from the CRPS regression test provide strong evidence for miscalibration of all methods in the psychology data set, no evidence for miscalibration of any method in the philosophy data sets, weak evidence for miscalibration of the N and S methods in the case of the economics data set, and weak evidence for miscalibration of all methods except the SH method in the social sciences data set.
+
+\begin{landscape}
+\begin{table}[!htb]
+\centering
+\caption{Results from scoring rule based calibration tests.}
+\label{table:contin-miscalibration-test}
+<< "table-score-miscalibtests", results = "asis" >>=
+# Miscalibration tests from Held, Rufibach, Balabdaoui (2010)
+# ----------------------------------------------------------------------------------
+# Note: LS/DSS scoring rules without constant terms were used in paper, 
+# whereas the definitions in Gneiting & Katzfuss (2014) involve also constants
+
+# Unconditional miscalibration tests
+score_calib_test <- function(theta_o, theta_r, sigma_o, sigma_r, tau = tau_default) {
+  # scoring rules according to definitions in paper
+  scoring_rules_test <- list("LS" = function(mu, sigma, y)  0.5*(log(sigma^2) + ((y - mu)/sigma)^2), 
+                             "CRPS" = CRPS)
+  scores <- get_scores(theta_o = theta_o, theta_r = theta_r, sigma_o = sigma_o, 
+                       sigma_r = sigma_r, tau = tau, scoring_rules = scoring_rules_test)
+  params <- get_params_all_methods(theta_o = theta_o, sigma_o = sigma_o, sigma_r = sigma_r, tau = tau)
+  n <- length(theta_o)
+  
+  test_log <- lapply(seq(ncol(scores) - 1), function(i) {
+    mean_LS <- mean(scores[scores$Type == "LS",i])
+    expectation <- 0.5 + mean(log(params[[i]]$sigma))
+    variance <- 1/(2*n)
+    test_statistic <- (mean_LS - expectation)/sqrt(variance)
+    test_pvalue <- 2*pnorm(q = abs(test_statistic), lower.tail = FALSE)
+    data.frame("t" = test_statistic, "pvalue" = test_pvalue, "Test" = "LS", 
+               "Method" = colnames(scores)[i])
+  })
+  test_crps <- lapply(seq(ncol(scores) - 1), function(i) {
+    mean_CRPS <- mean(scores[scores$Type == "CRPS",i])
+    expectation <- 1/sqrt(pi)*mean(params[[i]]$sigma)
+    variance <- 0.1627516/n^2 * sum(params[[i]]$sigma^2)
+    test_statistic <- (mean_CRPS - expectation)/sqrt(variance)
+    test_pvalue <- 2*pnorm(q = abs(test_statistic), lower.tail = FALSE)
+    data.frame("t" = test_statistic, "pvalue" = test_pvalue, "Test" = "CRPS", 
+               "Method" = colnames(scores)[i])
+  })
+  tests_df <- do.call(rbind, c(test_log, test_crps))
+  return(tests_df)
+}
+
+# Score regression calibration tests
+# 1) DSS_i = a + b*log(sigma_i) + e_i 
+# ===> e_i homoscedastic, H0: a = 0.5, b = 1
+# 2) CRPS_i = c + d*sigma_i + e_i 
+# ===> e_i heteroscedastic (w_i = 1/sigma^2_i), H0: c = 0, d = 1/sqrt(pi)
+score_calib_regr_test <- function(theta_o, theta_r, sigma_o, sigma_r, tau = tau_default) {
+  # scoring rules according to definitions in paper 
+  scoring_rules_test <- list("DSS" = function(mu, sigma, y) 0.5*(log(sigma^2) + ((y - mu)/sigma)^2), 
+                             "CRPS" = CRPS)
+  scores <- get_scores(theta_o = theta_o, theta_r = theta_r, sigma_o = sigma_o, 
+                       sigma_r = sigma_r, tau = tau, scoring_rules = scoring_rules_test)
+  params <- get_params_all_methods(theta_o = theta_o, sigma_o = sigma_o, 
+                                   sigma_r = sigma_r, tau = tau)
+  
+  test_dss <- lapply(seq(ncol(scores) - 1), function(i) {
+    dss_i <- scores[scores$Type == "DSS",i]
+    sigma_i <- params[[i]]$sigma
+    fit_dss_i <- lm(dss_i ~ 1 + log(sigma_i))
+    ab_diff_i <- matrix(coef(fit_dss_i) - c(0.5, 1))
+    statistic <- t(ab_diff_i) %*% solve(vcov(fit_dss_i)) %*% ab_diff_i
+    test_pvalue <- pchisq(q = statistic, 2, lower.tail = FALSE)
+    data.frame("t" = statistic, "pvalue" = test_pvalue, 
+               "Test" = "DSS-Regression", "Method" = colnames(scores)[i])
+  })
+  test_crps <- lapply(seq(ncol(scores) - 1), function(i) {
+    crps_i <- scores[scores$Type == "CRPS",i]
+    sigma_i <- params[[i]]$sigma
+    fit_crps_i <- lm(crps_i ~ 1 + sigma_i, weights = 1/sigma_i^2)
+    cd_diff_i <- matrix(coef(fit_crps_i) - c(0, 1/sqrt(pi)))
+    statistic <- t(cd_diff_i) %*% solve(vcov(fit_crps_i)) %*% cd_diff_i
+    test_pvalue <- pchisq(q = statistic, 2, lower.tail = FALSE)
+    data.frame("t" = statistic, "pvalue" = test_pvalue, 
+               "Test" = "CRPS-Regression", "Method" = colnames(scores)[i])
+  })
+  tests_df <- do.call(rbind, c(test_dss, test_crps))
+  return(tests_df)
+}
+
+# Conduct score based miscalibration tests
+miscalibtest_df <- lapply(unique(replication_data$Project), function(project) {
+  tmp_data <- replication_data[replication_data$Project == project,]
+  test1 <- with(tmp_data, score_calib_test(theta_o = FZ_OS, theta_r = FZ_RS, 
+                                           sigma_o = FZ_se_OS, sigma_r = FZ_se_RS))
+  test2 <- with(tmp_data, score_calib_regr_test(theta_o = FZ_OS, theta_r = FZ_RS, 
+                                                sigma_o = FZ_se_OS, sigma_r = FZ_se_RS))
+  data.frame(rbind(test1, test2), Project = project)
+}) %>% 
+  bind_rows()
+
+# Score-based miscalibration tests
+miscalibtest_table_df <- miscalibtest_df %>% 
+  mutate(Project = factor(Project, levels = levels_projects))
+
+miscalib_table <- tabular(Project*Method ~ Test*(t*Format(digit = 1) + formatPval(pvalue)*
+                          Justify(c,l))*Heading()*identity, data = miscalibtest_table_df)
+colLabels(miscalib_table)[1,1] <- "Test type"
+colLabels(miscalib_table)[3,] <- rep(c("Statistic", "$p\\,$-value"), 4)
+rowLabels(miscalib_table)[2,1] <- "$n = 18$"
+rowLabels(miscalib_table)[6,1] <- "$n = 31$"
+rowLabels(miscalib_table)[10,1] <- "$n = 73$"
+rowLabels(miscalib_table)[14,1] <- "$n = 21$"
+toKable(miscalib_table, booktabs = TRUE)
+@
+\end{table}
+\end{landscape}
+
+\section{Forecasts of statistical significance}
+
+\subsection{Estimated probability of statistical significance}
+Figure \ref{fig:probabilities-significance-predicitive-distr} shows the probabilities of a statistically significant test statistic in the replication study under the investigated predictive distributions, grouped by whether or not the replications actually achieved significance.
+When looking at the statistical methods, the estimated probabilities of significance are generally high, even for many of the studies where the replications did not achieve significance.
+\begin{figure}[!htb]
+<< "plot-binary-predictions", fig.height = 4.5 >>=
+# Helper functions to compute probability for significant replication in same direction
+# under gaussian predictive distribution
+prob_signif <- function(mu, sigma, sigma_r, alpha = 0.05) {
+  direction <- ifelse(mu >= 0, 1, -1)
+  p_significant <- pnorm(direction*qnorm(1 - alpha/2), mean = mu/sigma_r, sd = sigma/sigma_r, 
+                         lower.tail = ifelse(direction == 1, FALSE, TRUE))
+  return(p_significant)
+}
+
+get_prob_signif <- function(theta_o, sigma_o, sigma_r, tau = tau_default, alpha = 0.05) {
+  params <- get_params_all_methods(theta_o = theta_o, sigma_o = sigma_o, sigma_r = sigma_r, tau = tau)
+  p_significant <- lapply(params, function(method) {
+    prob_signif(mu = method$mu, sigma = method$sigma, sigma_r = sigma_r, alpha = alpha)
+    })
+  return(p_significant)
+}
+
+# Compute binary predictions under all prediction methods and merge to one data set
+binary_pred_stat <- with(replication_data, 
+                         get_prob_signif(theta_o = FZ_OS, sigma_o = FZ_se_OS,
+                                         sigma_r = FZ_se_RS, alpha = 0.05)) %>% 
+  data.frame(replication_data) %>% 
+  gather(key = "Method", value = "p", levels_methods)
+
+binary_pred_df <- pm_data %>% 
+  mutate(p = Market_Belief,
+         Method = "PM") %>% 
+  rbind(binary_pred_stat) %>% 
+  mutate(Project = factor(Project, levels = levels_projects),
+         Method = factor(Method, levels = levels_methods_pm))
+
+# Plot probabiliity of significant estimate in same direction under different methods
+ggplot(binary_pred_df, aes(x = as.numeric(interaction(Method, pval_RS_significant)), y = p)) +
+  geom_line(aes(group = Study), alpha = 0.5) +
+  geom_point(aes(fill = Method), shape = 21, size = 2, alpha = 0.8) +
+  facet_wrap(~ Project) +
+  scale_x_continuous(breaks = c(3, 8), labels = unique(binary_pred_df$pval_RS_significant)) +
+  scale_fill_manual(name = "Method", values = colors_methods) +
+  labs(x = "Statistical significance of replication study", 
+       y = "Estimated probability of significance") +
+  theme_bw() +
+  theme(panel.grid.major.x = element_blank())
+@
+\caption{Probabilities of statistically significant replication outcome under predictive distributions (at $\alpha = 0.05$).}
+\label{fig:probabilities-significance-predicitive-distr}
+\end{figure}
+Comparing the different replication projects, in the social science data set the distributions of the estimated probabilities among all methods are virtually identical between the significant and non-significant replication studies, suggesting low discriminatory power of all methods.
+In the economics, philosophy, and psychology data sets, on the other hand, the estimated probabilities of the non-significant replications are in most cases slightly smaller, indicating some discriminatory power of the forecasts. 
+Looking at the different prediction methods, the estimated probabilities are generally smaller for the S compared to the N method, and similarly for the H compared to SH method.
+Moreover, in the social sciences data set the probabilities from the non-statistical prediction market method are much lower for non-significant replications compared to the probabilities of the significant replications, suggesting substantial discriminatory power of this method. 
+In the economics data set, however, the prediction market probabilities are high for both significant and non-significant replications, indicating only low discriminatory power.
+
+\subsection{Expected vs. observed number of significant replications at different thresholds}
+
+% Propositions have been made recently for lowering the significance threshold for the claim of new scientific discoveries \citep{Benjamin2017}. 
+It is also interesting to compare the expected and observed number of statistically significant replication outcomes for smaller significance thresholds than 0.05, as shown in Figure \ref{fig:expected-observed-alpha}.
+\begin{figure}[!htb]
+<< "plot-expected-observed-alpha", fig.height = 4 >>=
+# Expected vs. observed #significant replications for different alpha values
+apply_grid <- expand.grid(alpha = seq(0.001, 0.06, 0.001),
+                          project = unique(replication_data$Project))
+exp_obs_df <- apply(apply_grid, 1, function(par) {
+  tmp_data <- replication_data[replication_data$Project == par["project"],]
+  p <- with(tmp_data, get_prob_signif(theta_o = FZ_OS, sigma_o = FZ_se_OS, 
+                                      sigma_r = FZ_se_RS, alpha = as.double(par["alpha"]))) 
+  Exp <- sapply(p, sum)
+  N <- nrow(tmp_data)
+  Obs <- sum(tmp_data$pval_RS < as.double(par["alpha"]))
+  X <- (Obs - Exp)^2/Exp + ((N - Obs) - (N - Exp))^2/(N - Exp)
+  result <- data.frame(N, 
+                       Observed = Obs, 
+                       Expected = Exp, 
+                       pvalue = formatPval(pchisq(X, df = 1, lower.tail = FALSE)),
+                       Method = names(Exp), Project = par["project"], 
+                       alpha = as.double(par["alpha"]))
+  return(result)
+}) %>% 
+  bind_rows() %>% 
+  mutate(Method = factor(Method, levels = levels_methods),
+         Project = factor(Project, levels = levels_projects))
+
+ggplot(data = exp_obs_df, aes(x = alpha, y = Observed)) + 
+  geom_step(aes(color = "Observed")) +
+  geom_step(aes(x = alpha, y = Expected, color = Method)) +
+  facet_wrap(~ Project, scales = "free") + 
+  scale_x_log10(breaks = c(0.001, 0.002, 0.005, 0.015, 0.05, 0.15, 0.4, 1)) +
+  expand_limits(y = 0) +
+  labs(x = expression(alpha), y = "Number of significant replications") +
+  scale_color_manual(values = c(Observed = 1, colors_methods)) +
+  guides(color = guide_legend(title = "")) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+@
+\caption{Expected and observed number of statistically significant replication studies as function of $\alpha$.}
+\label{fig:expected-observed-alpha}
+\end{figure}
+For all values of $\alpha$, the expected number is smaller for the S and SH methods than for the N and H methods, and it is also smaller when taking into account heterogeneity compared to when not taking heterogeneity into account.
+These results indicate again that the SH method leads to more realistic forecasts.
+Comparing the different data sets, in the psychology and social sciences data sets the difference between the expected and observed number of significant replications is large across the whole range of possible significance thresholds for all four prediction methods.
+In the philosophy and the economics data set, on the other hand, the expected number is much closer to the observed number, especially for the S and SH methods.
+
+\subsection{Brier scores}
+In Figure \ref{fig:brier-plot} the mean Brier scores are shown visually with the corresponding standard errors. 
+Note that the standard errors are only shown to illustrate the spread of the individual scores and not to compare the mean scores between the methods.
+\begin{figure}[!htb]
+<< "plot-brier", fig.height = 3.5 >>=
+# Plot of mean brier score with standard errors
+brier_table_df <- binary_pred_df %>% 
+  mutate(y = as.integer(pval_RS < 0.05),
+         brier = (y - p)^2) %>% 
+  group_by(Project, Method) %>% 
+  summarise(mean_brier0 = mean(y)*(1 - mean(y)),
+            mean_brier = mean(brier),
+            mean_brier_norm = (mean_brier0 - mean_brier)/mean_brier0,
+            z = sum((y - p)*(1 - 2*p))/sqrt(sum((1 - 2*p)^2*p*(1 - p))),
+            pvalue = formatPval(2*pnorm(q = abs(z), lower.tail = FALSE)),
+            se_mean_brier = sd(brier)/sqrt(n())) %>% 
+  ungroup() 
+
+brier_plot_df <- brier_table_df %>% 
+  # same order as in tables
+  mutate(Method = factor(Method, levels = rev(levels_methods_pm)),
+         Project = factor(Project, levels = rev(levels_projects)))
+
+ggplot(data = brier_plot_df, aes(x = Project, y = mean_brier, color = Method)) + 
+  geom_hline(yintercept = 0.25, lty = 3) +
+  geom_pointrange(aes(ymin = mean_brier - se_mean_brier, ymax = mean_brier + se_mean_brier),
+                  position = position_dodge2(width = 0.5), fatten = 3) + 
+  labs(y = bquote(paste("Mean Brier score (", ''%+-%'', " se)"))) + 
+  guides(color = guide_legend(reverse = TRUE)) +
+  expand_limits(y = 0) + 
+  coord_flip() +
+  scale_color_manual(name = "Method", values = colors_methods) + 
+  theme_bw()
+@
+\caption{Mean Brier scores.}
+\label{fig:brier-plot}
+\end{figure}
+
+The mean Brier scores were also computed for binary forecasts at other significance thresholds $\alpha$ than 0.05, as shown in Figure \ref{fig:brier-alpha-plot}. 
+\begin{figure}[!htb]
+<< "plot-brier-alpha", fig.height = 4 >>=
+# Plot brier score for different levels of alpha
+apply_grid <- expand.grid(alpha = seq(0.001, 0.06, 0.001),
+                          project = unique(replication_data$Project))
+brier_alpha_df <- apply(apply_grid, 1, function(par) {
+  tmp_data <- replication_data[replication_data$Project == par["project"],]
+  p <- with(tmp_data, get_prob_signif(theta_o = FZ_OS, sigma_o = FZ_se_OS, 
+                                      sigma_r = FZ_se_RS, alpha = as.double(par["alpha"]))) 
+  y <- as.integer(tmp_data$pval_RS < as.double(par["alpha"]))
+  mean_brier <- sapply(p, function(p) mean((y - p)^2))
+  result <- data.frame(mean_brier,
+                       Method = names(mean_brier), 
+                       Project = par["project"], 
+                       alpha = as.double(par["alpha"]))
+  return(result)
+}) %>% 
+  bind_rows() %>% 
+  mutate(Method = factor(Method, levels = levels_methods),
+         Project = factor(Project, levels = levels_projects))
+
+ggplot(brier_alpha_df, aes(x = alpha, y = mean_brier, color = Method)) + 
+  geom_hline(yintercept = 0.25, lty = 3, alpha = 0.8) +
+  geom_step() +
+  facet_wrap(~ Project) + 
+  ylim(0, 0.52) +
+  scale_x_log10(breaks = c(0.001, 0.002, 0.005, 0.015, 0.05, 0.15, 0.4, 1)) +
+  labs(x = bquote(alpha), y = "Mean Brier score") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+@
+\caption{Mean Brier score as function of $\alpha$.}
+\label{fig:brier-alpha-plot}
+\end{figure}
+Across the whole range of $\alpha$ values, the SH method shows the smallest mean Brier scores in all data sets, while the N method usually shows the largest mean Brier score.
+% However, the mean Brier scores increase with lower values of $\alpha$ for all methods, suggesting that they overestimate the probability of significance also for lower thresholds. 
+% Only in the philosophy data set, the mean Brier scores remain below 0.25 for all but the predictive method.
+% In the other data sets the mean Brier scores exceed or never reach values below 0.25.
+
+\subsection{Calibration slope}
+Figure \ref{fig:calibration-slope-alpha} shows the calibration slopes of the statistical forecasts for smaller significance thresholds $\alpha$ than 0.05.
+\begin{figure}[!htb]
+<< "plot-calibslope-alpha", fig.height = 4.5, results = FALSE >>=
+# Plot of calibration slope and CI for different alpha
+apply_grid <- expand.grid(alpha = seq(0.001, 0.06, 0.001),
+                          project = unique(replication_data$Project))
+calibslope_alpha_df <- apply(apply_grid, 1, function(par) {
+  tmp_data <- replication_data[replication_data$Project == par["project"],]
+  p <- with(tmp_data, get_prob_signif(theta_o = FZ_OS, sigma_o = FZ_se_OS, 
+                                      sigma_r = FZ_se_RS, alpha = as.double(par["alpha"])))
+  y <- as.integer(tmp_data$pval_RS < as.double(par["alpha"]))
+  results_list <- lapply(names(p), function(method) {
+    logist_fit <- try(glm(y ~ qlogis(p[[method]]), family = "binomial"))
+    if(inherits(logist_fit, "try-error")) {
+      NA_df <- data.frame(CI_lower = NA, 
+                          Slope = NA, 
+                          CI_upper = NA, 
+                          Method = method, 
+                          Project = par["project"],
+                          alpha = as.double(par["alpha"]))
+      return(NA_df)
+    } else {
+      slope_ci <- confint.default(logist_fit)
+      data.frame(CI_lower = slope_ci[2,1], 
+                 Slope = unname(coef(logist_fit)[2]), 
+                 CI_upper = slope_ci[2,2], 
+                 Method = method, 
+                 Project = par["project"],
+                 alpha = as.double(par["alpha"]))
+      }
+    })
+  results_df <- bind_rows(results_list)
+  return(results_df)
+}) %>% 
+  bind_rows() %>% 
+  # same order as in tables
+  mutate(Method = factor(Method, levels = levels_methods),
+         Project = factor(Project, levels = levels_projects))
+
+ggplot(data = calibslope_alpha_df, aes(x = alpha, y = Slope, color = Method)) +
+  geom_hline(yintercept = 1, lty = 2, alpha = 0.8) + 
+  geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper, fill = Method), alpha = 0.1, lty = 3) +
+  geom_line(size = 0.6, alpha = 0.8) + 
+  facet_wrap(~ Project, scales = "free") +
+  scale_x_log10(breaks = c(0.001, 0.002, 0.005, 0.015, 0.05)) +
+  labs(x = expression(alpha), y = "Calibration slope") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+@
+\caption{Calibration slopes with 95\% confidence intervals as function of $\alpha$.}
+\label{fig:calibration-slope-alpha}
+\end{figure}
+Looking at the psychology and social sciences data sets, all calibration slopes increase slightly for lower values of $\alpha$, with the H and SH methods showing the highest values, yet all still remain below the nominal value of one.
+In the the economics data set, one the other hand, the calibration slopes become smaller with decreasing $\alpha$ for all methods, the N and  H methods show even negative values. 
+Furthermore, for decreasing values of $\alpha$ the confidence intervals of the calibration slope become extremely wide.
+Finally, in the philosophy data set the slopes of all methods increase with decreasing $\alpha$ until $\alpha = 0.002$, where they start to decrease again to values close to one.
+
+\subsection{Area under the curve}
+Figure \ref{fig:AUC-alpha-plot} shows the AUC as a function of the significance threshold $\alpha$. 
+\begin{figure}[!htb]
+<< "plot-AUC-alpha", fig.height = 4.5 >>=
+# Plot AUC with CI for different alpha values
+apply_grid <- expand.grid(alpha = seq(0.001, 0.06, 0.001),
+                          project = unique(replication_data$Project))
+auc_alpha_df <- apply(apply_grid, 1, function(par) {
+  tmp_data <- replication_data[replication_data$Project == par["project"],]
+  p <- with(tmp_data, get_prob_signif(theta_o = FZ_OS, sigma_o = FZ_se_OS, 
+                                      sigma_r = FZ_se_RS, alpha = as.double(par["alpha"])))
+  y <- as.integer(tmp_data$pval_RS < as.double(par["alpha"]))
+  
+  AUCs <- lapply(p, function(p) confIntAUC(cases = p[y == 1], controls = p[y == 0]))
+  result <- data.frame(CI_lower = sapply(AUCs, function(x) x$lower[2]),
+                       AUC = sapply(AUCs, function(x) x$AUC[2]),
+                       CI_upper = sapply(AUCs, function(x) x$upper[2]),
+                       Method = names(AUCs), 
+                       Project = par["project"], 
+                       alpha = as.double(par["alpha"]))
+  return(result)
+}) %>% 
+  bind_rows() %>% 
+  # same order as in tables
+  mutate(Method = factor(Method, levels = levels_methods),
+         Project = factor(Project, levels = levels_projects))
+
+ggplot(auc_alpha_df, aes(x = alpha, y = AUC, color = Method)) +
+  geom_hline(yintercept = 0.5, lty = 2, alpha = 0.8) +
+  geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper, fill = Method), alpha = 0.1, lty = 3) +
+  geom_step(size = 0.6, alpha = 0.8) + 
+  facet_wrap(~ Project) +
+  scale_x_log10(breaks = c(0.001, 0.002, 0.005, 0.015, 0.05, 0.5)) +
+  labs(x = expression(alpha)) +
+  theme_bw() +
+  theme(legend.position = "bottom", axis.text.x = element_text(size = 7))
+@
+\caption{Area under the curve with 95\% confidence intervals as function of $\alpha$.}
+\label{fig:AUC-alpha-plot}
+\end{figure}
+Due to fewer replications that are significant for small $\alpha$, the confidence intervals become wider as $\alpha$ decreases. 
+In the philosophy, social sciences, and psychology data sets, the AUCs of all methods stay more or less constant over the entire range of $\alpha$. 
+Namely, the AUCs of all methods remain around 0.5 to 0.6 in the social sciences data set, while they remain around 0.7 to 0.8 in the psychology and philosophy data sets.
+In the economics data set, on the other hand, for all methods the AUCs also decrease with decreasing $\alpha$ to values of around 0.5.
+
+\section{Comparing default heterogeneity value with empirical distribution of estimates}
+Figure \ref{fig:tau-distribution} shows a histogram of 497 between-study heterogeneity estimates from meta-analyses
+with correlation effect sizes published in the journal \emph{Psycholgical Bulletin} between 1990 and 2013 \citep{VanErp2017}. 
+\begin{figure}
+<< "plot-tau-distribution", fig.height = 3 >>=
+# data from Van Erp et al. (2017) downloaded from https://osf.io/3u6dn/
+tau_df <- read.csv("../../Data/tau_data_psychology.csv")
+tau_cor_df <- tau_df %>%
+  filter(Type.of.ES %in% c("Weighted Pearson's r",
+                           "Corrected Pearson's r",
+                           "Pearson's r",
+                           "Weighted corrected Pearson's r"))
+ggplot(tau_cor_df, aes(x = tau)) +
+  geom_histogram(breaks = seq(0, 0.6, length.out = 13), col = 1, fill = "darkgrey", alpha = 0.8) +
+  geom_vline(xintercept = 0.08, lty = 2, color = "darkred", size = 1, alpha = 0.8) +
+  annotate(geom = "text", x = 0.16, y = 140, label = "chosen value",
+           color = "darkred", size = 6) +
+  geom_rug(alpha = 0.5) +
+  labs(x = expression(hat(tau)), y = "Number of estimates") +
+  scale_y_continuous(breaks = seq(0, 140, 20), limits = c(0, 140)) +
+  theme_bw()
+@
+\caption{Empirical distribution of 497 between-study heterogeneity estimates of meta-analyses
+with correlation effect sizes in the journal \emph{Psycholgical Bulletin} between 1990 and 2013
+\citep{VanErp2017}. Chosen default value of $\tau = 0.08$ for forecasts taking into account heterogeneity indicated
+by dashed line.}
+\label{fig:tau-distribution}
+\end{figure}
+The dashed line indicates the chosen default value of $\tau = 0.08$ which corresponds to the 
+\Sexpr{100*round(mean(tau_cor_df$tau <= 0.08, na.rm = TRUE), 2)}\% quantile of this distribution. 
+This seems reasonable to us, as those estimates stem from meta-analysis of ordinary studies that are likely to be more 
+heterogeneous than direct replication studies, yet the value of 0.08 is still sufficiently different from zero such that
+we can investigate whether predictive performance can be improved compared to forecasts not taking into account heterogeneity.
+
+\newpage ~
+\bibliographystyle{apalikedoiurl}
+\bibliography{bibliography}
+
+\newpage ~
+<< "sessionInfo1", eval = Reproducibility, results = "asis" >>=
+## print R sessionInfo to see system information and package versions
+## used to compile the manuscript (set Reproducibility = FALSE, to not do that)
+cat("\\newpage \\section*{Computational details}")
+@
+<< "sessionInfo2", echo = Reproducibility, results = Reproducibility >>=
+cat(paste(Sys.time(), Sys.timezone(), "\n"))
+sessionInfo()
+@
+
+\end{document}

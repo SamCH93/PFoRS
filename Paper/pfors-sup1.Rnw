@@ -1,0 +1,216 @@
+\documentclass[a4paper, 11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{natbib} % citations
+\usepackage{amsmath} % math
+\input{newCommands.tex} % commands by leo for nicer formatting
+\usepackage{doi}
+
+% margins %
+\usepackage{geometry}
+ \geometry{
+ a4paper,
+ total={170mm,257mm},
+ left=25mm,
+ right=25mm,
+ top=30mm,
+ bottom=25mm,
+}
+ 
+\usepackage{hyperref}
+\hypersetup{
+  bookmarksopen=true,
+  breaklinks=true,
+  colorlinks=true,
+  linkcolor=black,
+  anchorcolor=black,
+  citecolor=blue,
+  urlcolor=black,
+}
+
+% title, authors, date
+\title{Probabilistic forecasting of replication studies \\ 
+Supplement A: Data preprocessing}
+\author{Samuel Pawel, Leonhard Held}
+\date{\today}
+
+\begin{document}
+
+% knitr options
+% ===============================================================================
+<< "main-setup", include = FALSE >>=
+library(knitr)
+opts_chunk$set(fig.height = 4,
+               echo = FALSE,
+               warning = FALSE,
+               message = FALSE,
+               # size = "scriptsize"
+               child.command = "include",
+               cache = FALSE)
+
+## should sessionInfo be printed at the end?
+Reproducibility <- TRUE
+@
+% ===============================================================================
+
+\maketitle
+
+\section{Effect size scale}
+In the analysis of data from replication projects it has become common practice
+to transform effect sizes to the correlation coefficient scale $r$
+\citep{Opensc2015, Camerer2016, Camerer2018, Cova2018}. For an introduction to
+the conversion between effect size scales, see section 12.5 in
+\citet{Cooper2009}. An advantage of correlation coefficients is that they are
+bounded to the interval between minus one and one and are thus easy to compare
+and interpret. Moreover, by applying the variance stabilizing transformation,
+also known as Fisher $z$-transformation, $\hat{\theta} = \text{tanh}^{-1}(r)$,
+the transformed correlation coefficients become asymptotically normally
+distributed with their variance only being a function of the study sample size
+$n$, \ie $\Var(\hat{\theta}) = 1/(n - 3)$ \citep{Fisher1921}. The Fisher
+$z$-transformation is shown in Figure \ref{fig:fisher-z}. Throughout the paper
+modelling and prediction is carried out on the Fisher $z$ scale, but the results
+are often be backtransformed to the correlation scale by applying the inverse
+Fisher $z$-transformation, $r = \text{tanh}(\hat{\theta})$, for better
+comparability and interpretability.
+
+\begin{figure}[!htb]
+<< "fisher-z", fig.height = 3 >>=
+library(tidyverse)
+rho <- seq(-1, 1, 0.001)
+data.frame(rho, z = atanh(rho)) %>% 
+ggplot(aes(x = rho, y = z)) +
+geom_abline(intercept = 0, slope = 1, lty = 3) +
+geom_line(size = 0.6) + 
+labs(x = bquote(rho), y = bquote(italic(z)(rho))) +
+theme_bw()
+@
+\caption{Fisher $z$-transformation.}
+\label{fig:fisher-z}
+\end{figure}
+
+\citet{Opensc2015} used the approach of computing \emph{correlation per degree
+  of freedom} based on the test statistics of the original effect estimates
+\citep[see page 74 in the supplementary material of][]{Opensc2015}. This is
+possible for $z$, $\chi^2$, $t$, and $F$ test statistics and can be done using
+the following formulas
+\begin{align*}
+\rho(t) &= \frac{\sqrt{t^2/\text{df}_2}}{(t^2/\text{df}_2) + 1} \\
+\rho(F) &= \frac{\sqrt{F(\text{df}_1/\text{df}_2)}}{\left\{F(\text{df}_1/\text{df}_2) + 1\right\}\sqrt{1/\text{df}_1}} \\
+\rho(\chi^2) &= \sqrt{\chi^2/n} \\
+\rho(z) &= \text{tanh}\left(z \sqrt{\frac{1}{n-3}}\right).
+\end{align*}
+The approach has become the standard for further replication projects
+ \citep{Camerer2016, Camerer2018, Cova2018}.
+
+\section{Data preprocessing}
+<< "supplementA-external-code", eval = TRUE, echo = FALSE, cache = FALSE >>=
+# Read in data preprocessing code
+knitr::read_chunk("../Data/EERP/data_extraction_EERP.R")
+knitr::read_chunk("../Data/RPP/data_extraction_RPP.R")
+knitr::read_chunk("../Data/SSRP/data_extraction_SSRP.R")
+knitr::read_chunk("../Data/RPPHI/data_extraction_RPPHI.R")
+knitr::read_chunk("../Data/data_extraction_final.R")
+@
+
+\subsection{Reproducibility Project: Psychology} 
+All files were downloaded from
+\url{https://github.com/CenterForOpenScience/rpp/archive/master.zip}. The
+\texttt{masterscript.R} was run and the data then taken from the generated
+\texttt{MASTER} object. The standard errors of the Fisher $z$-transformed
+correlation coefficients were obtained by binding the \texttt{final\$sei.o} and
+\texttt{final\$sei.r} vectors with the remaining data. According to the
+supplementary material, the $p\,$-values from the studies with ID's 7, 15, 47,
+94, 120, and 140 were one-sided and were therefore multiplied by two to obtain
+two-sided $p\,$-values. Only the ``meta-analytic subset'' was used, which
+consists of 73 studies where the standard error of the Fisher $z$-transformed
+effect estimates can be computed.
+
+<< "supplementA-preprocessing-rpp", eval = FALSE, echo = TRUE, cache = FALSE >>=
+# ==============================================================================
+# Reproducibility project Psychology (rpp)
+# ==============================================================================
+<<rpp-data-collection>>
+@
+
+\subsection{Experimental Economics Replication Project} 
+All files were downloaded from \url{https://osf.io/pnwuz/}. However, to
+``generate'' the data from the file \texttt{create\_studydetails.do}, the
+commercial software \texttt{STATA} is required. Since the data set is very
+small, the required data were manually extracted from the code in the file
+\texttt{create\_studydetails.do}. To compute the standard errors of the Fisher
+$z$-transformed effect estimates, the sample sizes reported in the
+\texttt{effectdata.py} file rather than the ones reported in the
+\texttt{create\_studydetails.do} were taken. The former correspond to the
+effective sample sizes while the latter in some cases corresponds to the number
+of measurements, which lead to different prediction intervals than the ones
+reported in the publication (however, in all tables \citet{Camerer2016} report
+the larger ``number of measurements'' sample size). The data regarding the
+prediction market and survey beliefs were also manually extracted from table S3
+in the supplementary material, which was downloaded from
+\url{http://science.sciencemag.org/content/suppl/2016/03/02/science.aaf0918.DC1}.
+
+<< "supplementA-preprocessing-eerp", eval = FALSE, echo = TRUE, cache = FALSE >>=
+# ==============================================================================
+# Experimental economics replication project (eerp)
+# ==============================================================================
+<<eerp-data-collection>>
+@
+
+\subsection{Social Sciences Replication Project} 
+The data were taken from the \texttt{D3 - ReplicationResults.csv} file, which
+was downloaded from \url{https://osf.io/abu7k}. For replications which underwent
+only the first stage, the data from the first stage were taken as the data for
+the replication study. For the replications which reached the second stage, the
+pooled data from both stages were taken as the data for the replication study.
+Additionally, the data regarding survey and prediction market beliefs were
+extracted from the \texttt{D6 - MeanPeerBeliefs.csv} file, which was downloaded
+from \url{https://osf.io/vr6p8/}.
+
+<< "supplementA-preprocessing-ssrp", eval = FALSE, echo = TRUE, cache = FALSE >>=
+# ==============================================================================
+# Social sciences replication project (ssrp)
+# ==============================================================================
+<<ssrp-data-collection>>
+@
+
+\subsection{Experimental Philosophy Replicability Project}
+All data were taken from the \texttt{XPhiReplicability\_CompleteData.csv} file,
+which was downloaded from \url{https://osf.io/4ewkh}. However, only a subset of
+31 of these replications could be used, since only for these data, effect
+estimates on correlation scale and effective sample size for original and
+replication were available simultaneously. Because $p\,$-values were most of the
+time reported as inequalities, they were recalculated using a normal
+approximation on the Fisher $z$ scale.
+
+<< "supplementA-preprocessing-rpphi", eval = FALSE, echo = TRUE, cache = FALSE >>=
+# ==============================================================================  
+# Experimental philosophy replicability project (rpphi)
+# ==============================================================================
+<<rpphi-data-collection>>
+@
+
+<< "supplementA-preprocessing-combining", eval = FALSE, echo = TRUE, cache = FALSE >>=
+# ==============================================================================  
+# Combining all data sets
+# ==============================================================================
+<<data-extraction-final>>
+@
+
+% Bibliography
+% ===============================================================================
+% \newpage
+\bibliographystyle{apalikedoiurl}
+\bibliography{bibliography}
+
+<< "sessionInfo1", eval = Reproducibility, results = "asis" >>=
+## print R sessionInfo to see system information and package versions
+## used to compile the manuscript (set Reproducibility = FALSE, to not do that)
+cat("\\newpage \\section*{Computational details}")
+@
+<< "sessionInfo2", echo = Reproducibility, results = Reproducibility >>=
+cat(paste(Sys.time(), Sys.timezone(), "\n"))
+sessionInfo()
+@
+
+\end{document}

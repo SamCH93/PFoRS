@@ -1,0 +1,8 @@
+knitr
+dplyr
+readr
+tidyr
+ggplot2
+ggbeeswarm
+ggpubr
+tables

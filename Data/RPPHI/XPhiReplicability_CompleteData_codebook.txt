@@ -1,0 +1,44 @@
+--Codebook for the "XPhiReplicability_CompleteData.csv" file--
+
+PAPER-ID: Codename for the study (usually first author's name + publication year)
+TEAM: Composition of the replication team
+YEAR: Publication year
+TYPE: Whether the study was randomly selected (=RANDOM) or selected as the most-cited study for its year (=MOST-CITED)
+TotalCitation: Number of citations received by the paper (according to Google Scholar, data collected March 23rd, 2018)
+Year: Number of years since the paper was published (2018-YEAR)
+CATEGORY: Whether the study was observational (=OBSERVATIONAL), content-based (=CONTENT), context-based (=CONTEXT), or investigating demographic variation (=DEMOGRAPHIC) (see paper)
+REPLACEMENT: Whether the study was selected as replacement for another study
+EffectTYPE: Whether the original effect to be replicated was a significant effect (=SIGN) or a null effect (=NULL)
+Difficulty: A score between 0 and 2 representing the amount of resources required to conduct the study (see paper)
+
+OriginalPOPULATION: Nature of the sample used in the original study
+OriginalCOUNTRY: Country the original sample's population was recruited from
+OriginalLANGUAGE: Language the original study was run in
+OriginalN_Overall: Sample size for the original study
+OriginalN_Effect: Number of participants involved in the significance test for the original effect
+OriginalTEST: Nature of the significance test used in the original study ("reconstructed" means that no significant test was used in the original study, but that we inferred the corresponding test)
+OriginalANALYSIS: Results of the original study's significance test
+OriginalEFFECTSIZE: Effect size corresponding to the original study's significance test
+OriginalRES: Original study's effect size converted to r effect size
+OriginalR95CI: 95%CI for the original study's effect after conversion to effect size
+OriginalPOWER: Power of the original study assuming the original study's sample size and r effect size
+TypicalPOWER: Power of the original study assuming an effect size of r = .20
+OriginalALTERNATE95CI: Alternate 95%CI for the original study's effect size when conversion to r effect size was impossible
+
+ReplicationPOPULATION: Nature of the sample used in the replication study
+ReplicationCOUNTRY: Country the replication sample's population was recruited from
+ReplicationLANGUAGE: Language the replication study was run in
+ReplicationN_Overall: Sample size for the replication study
+ReplicationN_Effect: Number of participants involved in the significance test for the replication effect
+ReplicationTEST: Nature of the significance test used in the replication study
+ReplicationANALYSIS: Results of the replication study's significance test
+ReplicationEFFECTSIZE: Effect size corresponding to the replication study's significance test
+ReplicationRES: Replication study's effect size converted to r effect size
+ReplicationR95CI: 95%CI for the replication study's effect after conversion to effect size
+ReplicationALTERNATE95CI: Alternate 95%CI for the replication study's effect size when conversion to r effect size was impossible
+
+OriginalESWithinCI: Whether the original effect size falls WITHIN, BELOW or is HIGHER than the replication 95%CI
+ReplicationESWithinCI: Whether the replication effect size falls WITHIN, BELOW or is HIGHER than the original 95%CI
+ReplicationSUCCESS: Whether the replication is successful according to the replication team's subjective assessment
+
+OSF: Link the OSF repository for the corresponding study
